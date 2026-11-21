@@ -1,0 +1,72 @@
+name: Publish Intel Mac beta
+
+on:
+  push:
+    branches:
+      - release/intel-beta-1
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-intel-beta:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download tested Intel build from successful CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 44904533950 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          test -s dist/ClawTank-0.9.0-x86_64.dmg
+          test -s dist/clawtank-mcp-0.9.0-x86_64.mcpb
+          (
+            cd dist
+            echo "d843872f0199afbf71a9507767bdb7628ff4f3d4d864107e4d7e0edc575f4990  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish v0.9.0 Intel beta 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          # Intel Mac compatibility beta
+
+          **For Intel Macs (x86_64) running macOS 14 Sonoma or newer.**
+          This build was produced by the successful dual-architecture CI run
+          [44904533950](https://github.com/TimothyZhang023/ClawTank/actions/runs/44904533950)
+          from commit `715a6e1` (PR #1 merged to main).
+
+          - Download `ClawTank-0.9.0-x86_64.dmg`, open it, and drag ClawTank to Applications.
+          - This test build is **ad-hoc signed and not notarized**. On the first launch, go to
+            System Settings > Privacy & Security > Open Anyway if macOS blocks it.
+          - Allow Screen Recording and Accessibility permissions during setup.
+          - Hardware H.264 encoding is preferred; unavailable Intel encoders may fall back to
+            VideoToolbox software encoding (potentially higher CPU usage).
+          - Intel virtual display / headless behavior requires testing on real hardware;
+            choose **Physical display** if virtual display creation does not work.
+          - CI passed on native Intel x86_64 and Apple silicon arm64, plus FreeRDP and cargo audit.
+            This is not a substitute for hands-on Intel RDP validation.
+
+          The separate `clawtank-mcp-0.9.0-x86_64.mcpb` is included for MCP users.
+          `SHA256SUMS` lists checksums for both assets.
+
+          **This is a pre-release**, not a new stable release.
+          NOTES
+          gh release create v0.9.0-intel-beta.1 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 715a6e1d88e21c1ee1702103f41bc8049c61274a \
+            --title "ClawTank 0.9.0 Intel Mac Beta 1" \
+            --notes-file release-notes.md \
+            --prerelease
