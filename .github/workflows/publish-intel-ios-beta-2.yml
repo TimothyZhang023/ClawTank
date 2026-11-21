@@ -1,0 +1,77 @@
+name: Publish Intel iOS graphics beta 2
+
+on:
+  push:
+    branches: [release/intel-ios-beta-2]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release-beta2:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download Intel CI build and verify its checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          gh run download 44917655395 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            test -s ClawTank-0.9.0-x86_64.dmg
+            test -s clawtank-mcp-0.9.0-x86_64.mcpb
+            echo "0c61520180bcd2d8a157e46b0087dfbdeb87ca83949a15e4c385dffab28bbfad  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish non-stable Intel beta for iOS client testing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          # Intel Mac / iOS Windows App compatibility test (Beta 2)
+
+          This is an **experimental** macOS 14+ Intel x86_64 test build produced from
+          PR #2 commit `31e9f1a` (not merged to main). Do not treat it as a verified fix.
+
+          **Changes since Beta 1**
+          - Defer the initial legacy RDP test image so the iOS Windows App can negotiate EGFX.
+          - Once EGFX is available, use H.264 exclusively instead of also sending legacy SurfaceBits.
+          - Clean up virtual display and VideoToolbox sessions when clients disconnect during startup.
+          - Keep legacy bitmap fallback for clients without EGFX.
+
+          The user reported that reducing iOS session resolution did not resolve the protocol error;
+          this build now suppresses the legacy image irrespective of resolution.
+
+          **Test**
+          1. Download the Intel DMG, drag the app to Applications, and quit the older ClawTank first.
+          2. This build is ad-hoc signed and not notarized. Approve it under System Settings >
+             Privacy & Security > Open Anyway on first launch.
+          3. Connect using iOS Windows App. Report whether the protocol error persists.
+          4. If it fails, attach ClawTank diagnostics; look for `EGFX ready; skipping legacy test frame`.
+
+          **Validation**: The exact Intel/arm64 runtime source compiled and passed the
+          macOS build and test jobs. The old FreeRDP smoke test was coupled to the legacy
+          test bitmap and therefore failed under the intended EGFX-first behavior.
+          A revised FreeRDP smoke test has subsequently passed; the iOS client itself
+          has not yet been validated.
+
+          Includes an optional x86_64 MCP Bundle and SHA256SUMS.
+          NOTES
+          gh release create v0.9.0-intel-beta.2 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 31e9f1a48d2b6b31b373ccb2bb65670dc00b003f \
+            --title "ClawTank 0.9.0 Intel iOS Graphics Beta 2" \
+            --notes-file notes.md \
+            --prerelease
