@@ -38,12 +38,11 @@ const MAX_WIDTH: u16 = 8192;
 const MAX_HEIGHT: u16 = 8192;
 const MIN_SIDE: u16 = 200;
 
-/// Large uncompressed legacy bitmaps can exceed what some iOS RDP clients tolerate,
-/// especially when they offer EGFX but the first AVC frame is still being prepared.
-/// Give EGFX negotiation a chance before sending the legacy test image; clients without
-/// EGFX still receive it, so the fallback path remains intact.
-const LARGE_LEGACY_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const EGFX_NEGOTIATION_GRACE: Duration = Duration::from_millis(500);
+/// Some RDP clients reject the legacy SurfaceBits test frame even when it is small,
+/// and will disconnect before the negotiated EGFX H.264 surface can be initialized.
+/// Give EGFX a short window to come online and avoid mixing the two paths.
+/// Clients that do not negotiate EGFX continue to receive the legacy test pattern.
+const EGFX_NEGOTIATION_GRACE: Duration = Duration::from_millis(1000);
 
 /// Serves the static test pattern.
 pub struct TestPatternDisplay {
@@ -156,25 +155,18 @@ impl TestPatternUpdates {
 impl RdpServerDisplayUpdates for TestPatternUpdates {
     async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
         if !self.sent {
-            let frame_bytes = usize::from(self.size.width) * usize::from(self.size.height) * 4;
-            if frame_bytes > LARGE_LEGACY_FRAME_BYTES {
-                // The iOS Windows App can negotiate EGFX before VideoToolbox has produced
-                // its first AVC frame. Avoid sending a ~20 MiB legacy bitmap in that gap.
-                // If the client has no EGFX support, continue with the original test frame.
-                tokio::time::sleep_until(self.initial_frame_deadline).await;
-            }
+            // Always defer the legacy frame, regardless of resolution. The iOS Windows App
+            // may reject SurfaceBits before H.264 is ready even for a small desktop.
+            // Keep a fixed deadline: next_update may be cancelled and re-polled by select!.
+            tokio::time::sleep_until(self.initial_frame_deadline).await;
             self.sent = true;
-            if frame_bytes > LARGE_LEGACY_FRAME_BYTES && self.video.is_channel_open() {
-                info!(
-                    width = self.size.width,
-                    height = self.size.height,
-                    "EGFX ready; skipping oversized legacy test frame"
-                );
+            if self.video.is_channel_open() {
+                info!("EGFX ready; skipping legacy test frame");
             } else {
                 info!(
                     width = self.size.width,
                     height = self.size.height,
-                    "Sending test frame"
+                    "No EGFX after grace period; sending legacy test frame"
                 );
                 return Ok(Some(self.frame()));
             }
