@@ -1,0 +1,79 @@
+name: Publish Intel EGFX diagnostic beta 3
+
+on:
+  push:
+    branches: [release/intel-egfx-diagnostic-beta-3]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download and verify successful Intel CI artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 44919460564 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "32650759d52f1abd2c7abcd9e76aeeb3c9cf37a62acf3b1ba6b93b00571a0041  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish experimental Intel-only compatibility pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          # Intel + AMD dual-GPU Mac / iOS Windows App protocol diagnostic
+
+          Experimental Intel x86_64 macOS 14+ release from PR #3 at commit
+          `e8a20e0`. Native Intel, Apple silicon, FreeRDP and security-audit CI passed.
+
+          **Background:** iOS Windows App connects and authenticates to the Intel Mac,
+          negotiates EGFX V10, then disconnects with a protocol error *before*
+          VideoToolbox begins H.264 encoding. The Intel Mac has both Intel integrated
+          graphics and AMD discrete graphics. Lowering resolution and the previous
+          EGFX-first Beta 2 did not resolve the problem.
+
+          **How to run the protocol isolation test**
+          1. Quit any running ClawTank instance.
+          2. Download the `ClawTank-0.9.0-x86_64.dmg` and replace the installed app.
+          3. For this unsigned beta, approve first launch under macOS System Settings >
+             Privacy & Security > Open Anyway if required.
+          4. Quit ClawTank again, then launch from Terminal with:
+             `CLAWTANK_DISABLE_EGFX=1 /Applications/ClawTank.app/Contents/MacOS/ClawTank`
+          5. Connect with iOS Windows App as before.
+
+          **Expected result:** a stable RDP connection showing a static **color-bar test
+          pattern**, not a live Mac desktop. Disabling EGFX disables the H.264 video
+          pipeline. This is a diagnostic mode only, not a remote-desktop performance fix.
+
+          - If the color bars stay visible, investigate EGFX DVC / capability negotiation.
+          - If the iOS client still errors, test legacy graphics and other channels next.
+
+          The optional MCP bundle and SHA256SUMS are attached. To return to normal
+          behavior, quit and launch ClawTank normally (without the environment variable).
+
+          This release is NOT merged into main and is not validated on the reporter's
+          iOS device.
+          NOTES
+          gh release create v0.9.0-intel-beta.3 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target e8a20e003df145a73a91eb2aeecd2f6f4af57215 \
+            --title "ClawTank Intel iOS Graphics Diagnostic Beta 3" \
+            --notes-file release-notes.md \
+            --prerelease
