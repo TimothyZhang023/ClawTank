@@ -63,6 +63,9 @@ final class ServerController: ObservableObject {
     private var server: RdpServer?
     private var video: VideoSession?
     private var videoTask: Task<Void, Never>?
+    /// Invalidates an in-flight capture setup as soon as EGFX closes, the client disconnects,
+    /// or a later resize supersedes it. The serialized task queue alone cannot cancel awaits.
+    private var videoRequestID: UInt64 = 0
     private let displays = DisplayService()
     private var statsTimer: Timer?
     private var lastCounters = VideoSession.Counters()
@@ -318,52 +321,90 @@ final class ServerController: ObservableObject {
 extension ServerController {
     /// Starts (or, after a resize, restarts) video at `width`×`height`. Start, stop and restart
     /// run strictly in order on `videoTask` so a resize can't race a disconnect.
+    /// Immutable snapshot of the client request. Avoids carrying a large closure through awaits.
+    private struct VideoStartRequest {
+        let id: UInt64
+        let width: Int
+        let height: Int
+        let scalePercent: Int?
+        let mode: DisplayMode
+        let frameRate: Int
+        let bitRateFactor: Double
+    }
+
     private func startVideo(width: Int, height: Int, scalePercent: Int?) {
-        guard server != nil else { return }
+        guard server != nil, session != nil else { return }
         guard CGPreflightScreenCaptureAccess() else {
-            // Shows the system prompt the first time; afterwards the user must use Settings.
             CGRequestScreenCaptureAccess()
             lastNotice = "Grant Screen Recording to ClawTank in System Settings, then reconnect"
             log.notice("Screen Recording not granted; client sees the test pattern")
             return
         }
-        let mode = settings.displayMode
-        let frameRate = settings.frameRate
-        let bitRateFactor = settings.quality.bitRateFactor
-        enqueueVideo { [self] in
-            await stopCurrentVideo()
-            guard let server else { return }
-            guard let target = await displays.prepare(width: width, height: height,
-                                                      scalePercent: scalePercent, mode: mode) else {
-                lastNotice = "No display available to share"
-                return
-            }
-            input.setSession(width: width, height: height, displayBounds: target.bounds)
-            let flag = overlayFlag
-            let video = VideoSession(server: server, width: width, height: height, target: target,
-                                     frameRate: frameRate, bitRateFactor: bitRateFactor) { flag.get() }
-            self.video = video
-            lastCounters = .init()
-            do {
-                try await video.start()
-                displayDescription = "\(target.isVirtual ? "Virtual" : "Physical") display \(width)×\(height)"
-                session?.resolution = "\(width)×\(height)"
-                log.info("Video \(width)x\(height)@\(frameRate) on \(target.displayID) virtual=\(target.isVirtual)")
-            } catch {
-                log.error("Video start failed: \(error.localizedDescription, privacy: .public)")
+        // Invalidate the previous request immediately, before the queued task can resume.
+        videoRequestID &+= 1
+        let request = VideoStartRequest(
+            id: videoRequestID, width: width, height: height, scalePercent: scalePercent,
+            mode: settings.displayMode, frameRate: settings.frameRate,
+            bitRateFactor: settings.quality.bitRateFactor)
+        enqueueVideo { [self] in await runVideoStart(request) }
+    }
+
+    private func videoRequestIsCurrent(_ id: UInt64) -> Bool {
+        videoRequestID == id && session != nil
+    }
+
+    private func runVideoStart(_ request: VideoStartRequest) async {
+        guard videoRequestIsCurrent(request.id) else { return }
+        await stopCurrentVideo()
+        guard videoRequestIsCurrent(request.id), let server else { return }
+        let target = await displays.prepare(
+            width: request.width, height: request.height,
+            scalePercent: request.scalePercent, mode: request.mode)
+        // A newly created display can finish setting up after the client has disconnected.
+        guard videoRequestIsCurrent(request.id) else {
+            displays.release()
+            return
+        }
+        guard let target else {
+            lastNotice = "No display available to share"
+            return
+        }
+        input.setSession(width: request.width, height: request.height, displayBounds: target.bounds)
+        let flag = overlayFlag
+        let video = VideoSession(
+            server: server, width: request.width, height: request.height, target: target,
+            frameRate: request.frameRate, bitRateFactor: request.bitRateFactor) { flag.get() }
+        self.video = video
+        lastCounters = .init()
+        do {
+            try await video.start()
+            // ScreenCaptureKit and VideoToolbox startup can outlive the RDP session.
+            guard videoRequestIsCurrent(request.id) else {
+                await video.stop()
                 if self.video === video { self.video = nil }
-                lastNotice = "Video failed: \(error.localizedDescription)"
+                displays.release()
                 return
             }
-            statsTimer?.invalidate()
-            statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.updateVideoStats() }
-            }
+            let displayKind = target.isVirtual ? "Virtual" : "Physical"
+            displayDescription = "\(displayKind) display \(request.width)×\(request.height)"
+            session?.resolution = "\(request.width)×\(request.height)"
+            log.info("Video \(request.width)x\(request.height)@\(video.effectiveFrameRate) on \(target.displayID)")
+        } catch {
+            if self.video === video { self.video = nil }
+            guard videoRequestIsCurrent(request.id) else { return }
+            log.error("Video start failed: \(error.localizedDescription, privacy: .public)")
+            lastNotice = "Video failed: \(error.localizedDescription)"
+            return
+        }
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.updateVideoStats() }
         }
     }
 
-    /// Stops video; with `releaseDisplay` also removes the virtual display (session over).
+    /// Stopping a channel invalidates pending starts immediately, even if cleanup is queued.
     private func stopVideo(releaseDisplay: Bool = false) {
+        videoRequestID &+= 1
         enqueueVideo { [self] in
             await stopCurrentVideo()
             if releaseDisplay {

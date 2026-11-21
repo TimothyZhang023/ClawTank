@@ -14,17 +14,27 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
+use bytes::Bytes;
 use ironrdp_egfx::pdu::Avc420Region;
 use ironrdp_pdu::gcc::{Monitor, MonitorFlags};
 use ironrdp_server::{EgfxServerMessage, GfxServerHandle, ServerEvent};
 use ironrdp_svc::ChannelFlags;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, watch};
 use tracing::{debug, info, warn};
 
 use crate::events::{CoreEvent, EventSink};
+
+/// Codec selected by EGFX capability negotiation.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCodec {
+    None = 0,
+    Avc420 = 1,
+    Uncompressed = 2,
+}
 
 /// Outcome of [`VideoHub::submit_h264`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +66,10 @@ pub struct VideoHub {
     inner: Mutex<Inner>,
     // Touched from handler callbacks (pipeline mutex held): atomics only.
     channel_open: AtomicBool,
+    codec: AtomicU8,
     session_size: AtomicU32,
+    /// Latest BGRA frame for the legacy bitmap path (watch coalesces slow clients).
+    legacy_frames: watch::Sender<Option<Bytes>>,
     frames_acked: AtomicU64,
     /// Send time per in-flight frame id. Its own lock: taken from the handler (pipeline mutex
     /// held) and from `submit_h264` *after* the pipeline mutex is released, never nested.
@@ -85,6 +98,7 @@ fn unpack(v: u32) -> (u16, u16) {
 
 impl VideoHub {
     pub fn new(sink: EventSink) -> Self {
+        let (legacy_frames, _) = watch::channel(None);
         Self {
             sink,
             inner: Mutex::new(Inner {
@@ -98,7 +112,9 @@ impl VideoHub {
                 frames_dropped: 0,
             }),
             channel_open: AtomicBool::new(false),
+            codec: AtomicU8::new(StreamCodec::None as u8),
             session_size: AtomicU32::new(pack(1920, 1080)),
+            legacy_frames,
             frames_acked: AtomicU64::new(0),
             send_times: Mutex::new(HashMap::new()),
             ack_latency_us: AtomicU32::new(0),
@@ -124,6 +140,26 @@ impl VideoHub {
         unpack(self.session_size.load(Ordering::Acquire))
     }
 
+    pub fn codec(&self) -> StreamCodec {
+        match self.codec.load(Ordering::Acquire) {
+            1 => StreamCodec::Avc420,
+            2 => StreamCodec::Uncompressed,
+            _ => StreamCodec::None,
+        }
+    }
+
+    /// A receiver for the latest uncompressed frame, sent by the legacy RDP display.
+    /// Unlike an unbounded queue, slow clients skip obsolete frames.
+    pub fn subscribe_legacy(&self) -> watch::Receiver<Option<Bytes>> {
+        self.legacy_frames.subscribe()
+    }
+
+    /// Whether a client has completed EGFX negotiation. The legacy display uses this
+    /// atomic flag to avoid sending an oversized bitmap once H.264 is available.
+    pub fn is_channel_open(&self) -> bool {
+        self.channel_open.load(Ordering::Acquire)
+    }
+
     /// A new connection built its pipeline: forget the previous session's state.
     pub fn attach(&self, handle: GfxServerHandle) {
         let mut inner = self.lock();
@@ -134,6 +170,7 @@ impl VideoHub {
         inner.frames_sent = 0;
         inner.bytes_sent = 0;
         inner.frames_dropped = 0;
+        self.legacy_frames.send_replace(None);
         self.frames_acked.store(0, Ordering::Release);
         self.ack_latency_us.store(0, Ordering::Release);
         self.send_times
@@ -165,10 +202,19 @@ impl VideoHub {
     }
 
     /// Handler callback: capabilities negotiated, frames may flow.
-    pub(crate) fn on_ready(&self) {
+    pub(crate) fn on_ready(&self, codec: StreamCodec) {
         let (w, h) = self.session_size();
+        self.codec.store(codec as u8, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
-            info!(width = w, height = h, "EGFX ready; requesting video");
+            if codec == StreamCodec::Uncompressed {
+                info!(
+                    width = w,
+                    height = h,
+                    "No-AVC client: starting live legacy bitmap capture"
+                );
+            } else {
+                info!(width = w, height = h, "EGFX AVC420 ready; requesting video");
+            }
             (self.sink)(CoreEvent::VideoStart {
                 width: w,
                 height: h,
@@ -199,6 +245,7 @@ impl VideoHub {
 
     /// Handler callback, or session end: the graphics channel is gone.
     pub(crate) fn on_close(&self) {
+        self.codec.store(StreamCodec::None as u8, Ordering::Release);
         if self.channel_open.swap(false, Ordering::AcqRel) {
             info!("EGFX closed; stopping video");
             (self.sink)(CoreEvent::VideoStop);
@@ -208,6 +255,7 @@ impl VideoHub {
     /// Called by the accept loop when a connection ends.
     pub fn session_ended(&self) {
         self.on_close();
+        self.legacy_frames.send_replace(None);
         let mut inner = self.lock();
         inner.handle = None;
         inner.surface = None;
@@ -218,6 +266,10 @@ impl VideoHub {
     pub fn can_accept(&self) -> bool {
         if !self.channel_open.load(Ordering::Acquire) {
             return false;
+        }
+        if self.codec() == StreamCodec::Uncompressed {
+            // Legacy bitmap updates are coalesced by watch; no EGFX frame ACK is required.
+            return true;
         }
         let handle = self.lock().handle.clone();
         let Some(handle) = handle else { return false };
@@ -236,8 +288,11 @@ impl VideoHub {
             bytes_sent: inner.bytes_sent,
             frames_dropped: inner.frames_dropped,
             frames_acked: acked,
-            frames_in_flight: u32::try_from(inner.frames_sent.saturating_sub(acked))
-                .unwrap_or(u32::MAX),
+            frames_in_flight: if self.codec() == StreamCodec::Uncompressed {
+                0
+            } else {
+                u32::try_from(inner.frames_sent.saturating_sub(acked)).unwrap_or(u32::MAX)
+            },
             ack_latency_us: self.ack_latency_us.load(Ordering::Acquire),
         }
     }
@@ -252,7 +307,48 @@ impl VideoHub {
         width: u16,
         height: u16,
     ) -> SubmitResult {
-        if data.is_empty() || !self.channel_open.load(Ordering::Acquire) {
+        self.submit_frame(data, keyframe, width, height, StreamCodec::Avc420)
+    }
+
+    /// BGRA8888 pixels for a no-AVC client. Serve them via compressed legacy
+    /// BitmapUpdate rather than one enormous EGFX WireToSurface1 (20+ MiB at Retina).
+    /// Watch keeps only the newest frame so a slow iOS client cannot build a backlog.
+    pub fn submit_uncompressed(&self, data: &[u8], width: u16, height: u16) -> SubmitResult {
+        let expected = usize::from(width) * usize::from(height) * 4;
+        if data.len() != expected
+            || self.codec() != StreamCodec::Uncompressed
+            || !self.channel_open.load(Ordering::Acquire)
+            || self.session_size() != (width, height)
+        {
+            return SubmitResult::NotReady;
+        }
+        {
+            let mut inner = self.lock();
+            if inner.frames_sent == 0 {
+                info!(
+                    width,
+                    height,
+                    bytes = data.len(),
+                    "First legacy desktop frame queued"
+                );
+            }
+            inner.frames_sent += 1;
+            inner.bytes_sent += data.len() as u64;
+        }
+        self.legacy_frames
+            .send_replace(Some(Bytes::copy_from_slice(data)));
+        SubmitResult::Sent
+    }
+
+    fn submit_frame(
+        &self,
+        data: &[u8],
+        keyframe: bool,
+        width: u16,
+        height: u16,
+        codec: StreamCodec,
+    ) -> SubmitResult {
+        if data.is_empty() || self.codec() != codec || !self.channel_open.load(Ordering::Acquire) {
             return SubmitResult::NotReady;
         }
         if (width, height) != self.session_size() {
@@ -305,7 +401,14 @@ impl VideoHub {
                 quantization_parameter: 22,
                 quality: 100,
             };
-            let frame_id = gfx.send_avc420_frame(surface, data, &[region], timestamp_ms);
+            let frame_id = match codec {
+                StreamCodec::Avc420 => {
+                    gfx.send_avc420_frame(surface, data, &[region], timestamp_ms)
+                }
+                // No-AVC clients use the legacy RDP display channel, not EGFX.
+                StreamCodec::Uncompressed => None,
+                StreamCodec::None => None,
+            };
             (frame_id, gfx.channel_id(), gfx.drain_output())
         };
         let sent = frame_id.is_some();

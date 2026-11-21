@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Keep only the latest PR revision: a series of small fixes should not queue dozens
+# of costly native macOS jobs that test obsolete commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-test:
     name: macOS ${{ matrix.arch }}
@@ -81,6 +87,8 @@ jobs:
             | target/debug/clawtank-mcp | grep -q '"tools":\['
       - name: FreeRDP smoke test
         run: tests/freerdp-smoke.sh core/target/debug/examples/testserver
+      - name: iOS no-AVC live bitmap protocol test
+        run: cd core && cargo test -p clawtank-core --test video ios_no_avc_declines_egfx_and_streams_live_legacy_bitmap -- --nocapture
 
   audit:
     runs-on: ubuntu-latest
