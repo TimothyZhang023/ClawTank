@@ -1,0 +1,96 @@
+name: Publish Intel ClearCodec PR11 Beta 6
+
+on:
+  push:
+    branches: [release/intel-clearcodec-pr11-beta-6]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify successful Intel CI build and package integrity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          result="$(gh run view 44957642780 --repo TimothyZhang023/ClawTank --json conclusion --jq '.conclusion')"
+          test "$result" = "success"
+          mkdir -p dist
+          gh run download 44957642780 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "01573283ffc9a15d03391f84fc9cf3d0b0a8eeba4b99c338524b4389dcb6fb36  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish independent Intel and mobile ClearCodec prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          # ClawTank Intel + upstream PR #11 ClearCodec test build
+
+          Intel x86_64 for **macOS 14+**, built from the integration branch
+          [fix/intel-mobile-clearcodec-pr11](https://github.com/TimothyZhang023/ClawTank/pull/5)
+          at merge commit `76d912c9`.
+
+          The commit has two parents: the fork's Intel-capable `main` and
+          upstream [HMAKT99/ClawTank#11](https://github.com/HMAKT99/ClawTank/pull/11)
+          by gpocali. The local branch preserves the Intel-specific software
+          VideoToolbox fallback, x86_64 CI and architecture-specific packaging.
+
+          ## Changes since Intel Beta 5
+          - iOS/Android Windows App clients advertise `AVC_DISABLED`; preserve
+            this negative flag during EGFX capabilities negotiation.
+          - Keep EGFX active and deliver live BGRA desktop changes as **lossless
+            ClearCodec tiles (~64×64)** instead of sending AVC420 to incompatible
+            clients or falling back to 3 fps legacy BitmapUpdate.
+          - Changed-tile encoding, raw backpressure handling and a latest-frame
+            retry mailbox in the Swift capture pipeline (upstream cap: 30 fps).
+          - Desktop clients with AVC420 continue on VideoToolbox H.264.
+          - Intel Quick Sync/AMD encoding issues are independent of the raw
+            ClearCodec path.
+
+          ## Validation
+          - CI run [44957642780](https://github.com/TimothyZhang023/ClawTank/actions/runs/44957642780):
+            **macOS x86_64, macOS arm64, FreeRDP interop, and audit all PASS**.
+          - `avc_disabled_client_gets_clearcodec_frames` checks capability
+            confirmation, tile diffing, sequence numbers, and exact decoded pixels.
+          - Native x86_64 application and MCP binary architecture checked before
+            building the DMG.
+
+          ## Test instructions
+          1. Quit older versions of ClawTank; install this DMG to /Applications.
+          2. Launch normally (without `CLAWTANK_DISABLE_EGFX=1`).
+          3. Connect from **iOS Windows App** using the same RDP host and credentials.
+          4. Verify the live Mac desktop appears, the connection remains stable,
+             and mouse / touch input works.
+          5. If it fails, export ClawTank diagnostics; include EGFX negotiation
+             and capture logs.
+
+          **This is an experimental pre-release. iOS Windows App on this
+          particular Intel+AMD dual-GPU Mac has not yet been verified.**
+          The integration PR remains unmerged to `main` until tested.
+          It is ad-hoc signed and not notarized; macOS Screen Recording and
+          Accessibility permissions may need to be granted again after installing.
+
+          Includes an optional x86_64 MCP bundle and SHA256SUMS.
+          NOTES
+          gh release create v0.9.0-intel-beta.6 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 76d912c9befa6f9938c2cda101722990e6fecdac \
+            --title "ClawTank 0.9.0 Intel + PR11 ClearCodec Beta 6" \
+            --notes-file notes.md \
+            --prerelease
