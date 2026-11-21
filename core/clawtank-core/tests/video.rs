@@ -194,10 +194,21 @@ async fn retina_sized_egfx_session_reaches_first_frame() {
         let events = Arc::clone(&events);
         let recorder = recorder.clone();
         move || {
-            if !submitted && events.lock().unwrap().iter().any(|event| {
-                matches!(event, CoreEvent::VideoStart { width: 2776, height: 1938 })
-            }) {
-                assert_eq!(video.submit_h264(FAKE_IDR, true, 2776, 1938), SubmitResult::Sent);
+            if !submitted
+                && events.lock().unwrap().iter().any(|event| {
+                    matches!(
+                        event,
+                        CoreEvent::VideoStart {
+                            width: 2776,
+                            height: 1938
+                        }
+                    )
+                })
+            {
+                assert_eq!(
+                    video.submit_h264(FAKE_IDR, true, 2776, 1938),
+                    SubmitResult::Sent
+                );
                 submitted = true;
             }
             recorder.frame_count() >= 1
@@ -205,7 +216,11 @@ async fn retina_sized_egfx_session_reaches_first_frame() {
     })
     .await
     .expect("Retina-sized EGFX session did not terminate unexpectedly");
-    assert!(ok, "No first EGFX frame at 2776×1938: {:?}", events.lock().unwrap());
+    assert!(
+        ok,
+        "No first EGFX frame at 2776×1938: {:?}",
+        events.lock().unwrap()
+    );
     assert_eq!(*recorder.reset_size.lock().unwrap(), Some((2776, 1938)));
 
     drop(session);
