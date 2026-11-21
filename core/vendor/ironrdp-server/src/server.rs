@@ -41,7 +41,7 @@ use crate::echo::{EchoDvcBridge, EchoServerHandle, EchoServerMessage, build_echo
 use crate::encoder::{UpdateEncoder, UpdateEncoderCodecs};
 #[cfg(feature = "egfx")]
 use crate::gfx::{EgfxServerMessage, GfxServerFactory};
-use crate::handler::RdpServerInputHandler;
+use crate::handler::{RdpServerInputHandler, dispatch_absolute_mouse, dispatch_relative_mouse};
 use crate::{SoundServerFactory, builder, capabilities};
 
 /// TCP listen backlog size for the RDP server socket.
@@ -1569,15 +1569,17 @@ impl RdpServer {
                 }
 
                 FastPathInputEvent::MouseEvent(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_absolute_mouse(handler.as_mut(), mouse.x_position, mouse.y_position, mouse.into());
                 }
 
                 FastPathInputEvent::MouseEventEx(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_absolute_mouse(handler.as_mut(), mouse.x_position, mouse.y_position, mouse.into());
                 }
 
                 FastPathInputEvent::MouseEventRel(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_relative_mouse(
+                        handler.as_mut(), i32::from(mouse.x_delta), i32::from(mouse.y_delta), mouse.into(),
+                    );
                 }
 
                 FastPathInputEvent::QoeEvent(quality) => {
@@ -1729,15 +1731,17 @@ impl RdpServer {
                 }
 
                 ironrdp_pdu::input::InputEvent::Mouse(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_absolute_mouse(handler.as_mut(), mouse.x_position, mouse.y_position, mouse.into());
                 }
 
                 ironrdp_pdu::input::InputEvent::MouseX(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_absolute_mouse(handler.as_mut(), mouse.x_position, mouse.y_position, mouse.into());
                 }
 
                 ironrdp_pdu::input::InputEvent::MouseRel(mouse) => {
-                    handler.mouse(mouse.into());
+                    dispatch_relative_mouse(
+                        handler.as_mut(), i32::from(mouse.x_delta), i32::from(mouse.y_delta), mouse.into(),
+                    );
                 }
 
                 ironrdp_pdu::input::InputEvent::Unused(_) => {}
