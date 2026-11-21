@@ -16,6 +16,7 @@ use ironrdp_async::FramedWrite as _;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::input::mouse::PointerFlags;
+use ironrdp_pdu::input::mouse_rel::{MouseRelPdu, PointerRelFlags};
 use ironrdp_pdu::input::mouse_x::PointerXFlags;
 use ironrdp_pdu::input::{MousePdu, MouseXPdu};
 use ironrdp_session::ActiveStageOutput;
@@ -69,6 +70,9 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
         FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, 0x1e),
         FastPathInputEvent::KeyboardEvent(KeyboardFlags::EXTENDED, 0x5b), // left Win down
         FastPathInputEvent::UnicodeKeyboardEvent(KeyboardFlags::empty(), 0x00e9), // é
+        // iPad direct-touch can send a click PDU without a preceding MOVE.
+        mouse(PointerFlags::LEFT_BUTTON | PointerFlags::DOWN, 0, 720, 550),
+        mouse(PointerFlags::LEFT_BUTTON, 0, 720, 550),
         mouse(PointerFlags::MOVE, 0, 400, 300),
         mouse(PointerFlags::LEFT_BUTTON | PointerFlags::DOWN, 0, 400, 300),
         mouse(PointerFlags::LEFT_BUTTON, 0, 400, 300),
@@ -87,8 +91,14 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
         ),
         FastPathInputEvent::MouseEventEx(MouseXPdu {
             flags: PointerXFlags::BUTTON1 | PointerXFlags::DOWN,
-            x_position: 400,
-            y_position: 300,
+            x_position: 550,
+            y_position: 450,
+        }),
+        // Relative button clicks apply the encoded motion BEFORE the press.
+        FastPathInputEvent::MouseEventRel(MouseRelPdu {
+            flags: PointerRelFlags::BUTTON1 | PointerRelFlags::DOWN,
+            x_delta: 12,
+            y_delta: -7,
         }),
     ];
     for frame in stage
@@ -120,15 +130,28 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
             unit: 0x00e9,
             down: true,
         },
+        InputEvent::Move { x: 720, y: 550 },
+        InputEvent::Button {
+            button: MouseButton::Left,
+            down: true,
+        },
+        InputEvent::Move { x: 720, y: 550 },
+        InputEvent::Button {
+            button: MouseButton::Left,
+            down: false,
+        },
+        InputEvent::Move { x: 400, y: 300 },
         InputEvent::Move { x: 400, y: 300 },
         InputEvent::Button {
             button: MouseButton::Left,
             down: true,
         },
+        InputEvent::Move { x: 400, y: 300 },
         InputEvent::Button {
             button: MouseButton::Left,
             down: false,
         },
+        InputEvent::Move { x: 400, y: 300 },
         InputEvent::Button {
             button: MouseButton::Middle,
             down: true,
@@ -141,8 +164,14 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
             vertical: 0,
             horizontal: -120,
         },
+        InputEvent::Move { x: 550, y: 450 },
         InputEvent::Button {
             button: MouseButton::X1,
+            down: true,
+        },
+        InputEvent::RelMove { dx: 12, dy: -7 },
+        InputEvent::Button {
+            button: MouseButton::Left,
             down: true,
         },
     ];
