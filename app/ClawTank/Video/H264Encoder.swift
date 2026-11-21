@@ -34,6 +34,9 @@ final class H264Encoder: @unchecked Sendable {
         var requireHardware = true
         /// Apple's low-latency rate control (selects the real-time "rtvc" encoder).
         var lowLatencyRateControl = false
+        /// Intel Macs without an available H.264 hardware encoder may use VideoToolbox software.
+        /// Off by default so existing hardware-only callers retain their contract.
+        var allowSoftwareFallback = false
 
         static func aligned(_ value: Int) -> Int { (value + 15) / 16 * 16 }
 
@@ -47,19 +50,65 @@ final class H264Encoder: @unchecked Sendable {
 
     let settings: Settings
     private let session: VTCompressionSession
+    private let sessionRequiredHardware: Bool
     private let output: @Sendable (EncodedFrame) -> Void
     private let log = Logger(subsystem: "dev.clawtank.ClawTank", category: "encode")
+
+    /// Try the requested hardware encoder first, then a conventional hardware encoder if
+    /// the low-latency variant is unavailable. Intel hosts may finally use software H.264.
+    struct EncoderConfiguration: Equatable {
+        let lowLatencyRateControl: Bool
+        let requireHardware: Bool
+    }
+
+    static func encoderConfigurations(for settings: Settings) -> [EncoderConfiguration] {
+        var attempts = [EncoderConfiguration(lowLatencyRateControl: settings.lowLatencyRateControl,
+                                             requireHardware: settings.requireHardware)]
+        if settings.lowLatencyRateControl {
+            attempts.append(.init(lowLatencyRateControl: false, requireHardware: settings.requireHardware))
+        }
+        if settings.requireHardware && settings.allowSoftwareFallback {
+            attempts.append(.init(lowLatencyRateControl: false, requireHardware: false))
+        }
+        return attempts
+    }
 
     init(settings: Settings, output: @escaping @Sendable (EncodedFrame) -> Void) throws {
         precondition(settings.width % 16 == 0 && settings.height % 16 == 0, "coded size must be 16-aligned")
         self.settings = settings
         self.output = output
 
+        // Use a local logger until the immutable session property is initialized.
+        let logger = Logger(subsystem: "dev.clawtank.ClawTank", category: "encode")
+        var selectedSession: VTCompressionSession?
+        var selectedConfiguration: EncoderConfiguration?
+        var lastError: Error = EncoderError.sessionCreation(-1)
+        for configuration in Self.encoderConfigurations(for: settings) {
+            do {
+                selectedSession = try Self.createSession(settings: settings, configuration: configuration,
+                                                         logger: logger)
+                selectedConfiguration = configuration
+                break
+            } catch {
+                lastError = error
+                logger.notice("Encoder option rejected: \(String(describing: error), privacy: .public)")
+            }
+        }
+        guard let selectedSession, let selectedConfiguration else { throw lastError }
+        self.session = selectedSession
+        self.sessionRequiredHardware = selectedConfiguration.requireHardware
+        if selectedConfiguration != Self.encoderConfigurations(for: settings).first {
+            logger.notice("Using encoder fallback: hardwareRequired=\(selectedConfiguration.requireHardware)")
+        }
+    }
+
+    private static func createSession(settings: Settings, configuration: EncoderConfiguration,
+                                      logger: Logger) throws -> VTCompressionSession {
         var spec: [CFString: Any] = [:]
-        if settings.lowLatencyRateControl {
+        if configuration.lowLatencyRateControl {
             spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true
         }
-        if settings.requireHardware {
+        if configuration.requireHardware {
             spec[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = true
         }
         var created: VTCompressionSession?
@@ -69,8 +118,20 @@ final class H264Encoder: @unchecked Sendable {
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
             refcon: nil, compressionSessionOut: &created)
         guard status == noErr, let created else { throw EncoderError.sessionCreation(status) }
-        session = created
 
+        do {
+            try configure(created, settings: settings, logger: logger)
+            let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(created)
+            guard prepareStatus == noErr else { throw EncoderError.sessionCreation(prepareStatus) }
+            return created
+        } catch {
+            VTCompressionSessionInvalidate(created)
+            throw error
+        }
+    }
+
+    private static func configure(_ session: VTCompressionSession, settings: Settings,
+                                  logger: Logger) throws {
         let keyframeFrames = Int(Double(settings.frameRate) * settings.keyframeIntervalSeconds)
         let properties: [(CFString, Any)] = [
             (kVTCompressionPropertyKey_RealTime, true),
@@ -88,18 +149,15 @@ final class H264Encoder: @unchecked Sendable {
         ]
         for (key, value) in properties {
             let status = VTSessionSetProperty(session, key: key, value: value as CFTypeRef)
-            // Some encoders reject optional tuning keys; only core ones are fatal.
             if status != noErr {
                 let fatal = [kVTCompressionPropertyKey_RealTime, kVTCompressionPropertyKey_AllowFrameReordering,
                              kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_AverageBitRate]
                 if fatal.contains(where: { $0 == key }) {
-                    VTCompressionSessionInvalidate(session)
                     throw EncoderError.property(key as String, status)
                 }
-                log.notice("Encoder ignored \(key as String, privacy: .public): \(status)")
+                logger.notice("Encoder ignored \(key as String, privacy: .public): \(status)")
             }
         }
-        VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
     deinit {
@@ -111,13 +169,13 @@ final class H264Encoder: @unchecked Sendable {
         copyProperty(kVTCompressionPropertyKey_EncoderID) as? String ?? "unknown"
     }
 
-    /// True if VideoToolbox reports a hardware encoder, or hardware was required and the
-    /// session was created (the low-latency "rtvc" encoder doesn't answer the query).
+    /// True if VideoToolbox reports hardware acceleration, or the selected session
+    /// required hardware and was created (some encoders do not answer the query).
     var isHardwareAccelerated: Bool {
         if let value = copyProperty(kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder) as? Bool {
             return value
         }
-        return settings.requireHardware
+        return sessionRequiredHardware
     }
 
     private func copyProperty(_ key: CFString) -> CFTypeRef? {

@@ -4,8 +4,12 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Compatibility
+- Beta Intel Mac (x86_64) support: fall back from low-latency H.264 hardware encoding to conventional hardware or software encoding when needed.
+- Native Intel and Apple-silicon build/test/package CI matrix, architecture-specific DMGs and MCP Bundles.
+
 ### MCP
-- The MCP server is packaged as an MCP Bundle (`clawtank-mcp-<version>-arm64.mcpb`) for one-click install in Claude Desktop, and listed in the MCP Registry as `io.github.HMAKT99/clawtank` (`server.json`). `make release` builds both.
+- The MCP server is packaged as an MCP Bundle (`clawtank-mcp-<version>-<arch>.mcpb`) for one-click install in Claude Desktop, and listed in the MCP Registry as `io.github.HMAKT99/clawtank` (`server.json`). `make release` builds both.
 - OpenClaw skill `clawtank-mac` on ClawHub (`packaging/openclaw/clawtank-mac/SKILL.md`): screenshots, input, apps and virtual displays through the Agent API.
 
 ### Documentation
@@ -15,7 +19,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 - CodeQL scanning for Rust and the workflows; CI actions pinned to commit SHAs.
 
 ### Dependencies
-- `libz-sys` 1.1.31 for RUSTSEC-2026-0418 (build script leaked environment variables into the build directory).
+- `libz-sys` 1.1.33 for RUSTSEC-2026-0544 (heap buffer overflow) and RUSTSEC-2026-0418 (build script environment leakage).
 - `crypto-bigint` 0.7.6 and `ctutils` 0.4.5 for RUSTSEC-2026-0387 and RUSTSEC-2026-0385 (timing side channels in constant-time code).
 - `x509-cert` 0.3 (certificate fields are now accessor methods; `TlsIdentity::public_key` updated), `sha2` 0.11.1, `base64` 0.23.
 - CI: `actions/checkout` and `actions/upload-artifact` v7.

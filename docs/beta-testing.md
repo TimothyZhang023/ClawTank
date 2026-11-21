@@ -7,7 +7,7 @@ Work through the sections that fit your setup. Each one takes 5–15 minutes. Re
 ## Before you start
 
 **You need:**
-- A Mac with Apple silicon running macOS 14 or later. This is the host.
+- An Apple silicon or Intel Mac running macOS 14 or later. This is the host; Intel support is beta.
 - A client device, one or more of:
   - a Windows PC (Remote Desktop Connection, `mstsc`, or Windows App)
   - another Mac, iPad or iPhone ([Windows App](https://apps.apple.com/app/windows-app/id1295203466))
@@ -15,7 +15,7 @@ Work through the sections that fit your setup. Each one takes 5–15 minutes. Re
   - Linux (FreeRDP 3)
 
 **Note for every report:**
-- Mac model, and macOS version (Apple menu → About This Mac)
+- Mac model, CPU architecture (`uname -m`), and macOS version (Apple menu → About This Mac)
 - client app and version, and client OS
 - network: same Wi-Fi, Ethernet, mixed, or Tailscale
 - whether the Mac has a monitor attached or is headless
@@ -82,6 +82,15 @@ Follow only the [README's Install section](../README.md#install). Don't use any 
 With no monitor or dummy plug attached and Display set to **Automatic**, connect from a laptop.
 
 **Expected:** a desktop at the client's own resolution. On a Retina client it's sharp at 2×.
+
+## Intel-specific checks (beta)
+
+On a native Intel Mac (not an Apple-silicon Mac running an Intel build under Rosetta):
+
+1. Run `make build && make test && make package`. Confirm the output is `ClawTank-<version>-x86_64.dmg`.
+2. Check both executables with `lipo -archs app/build/Build/Products/Release/ClawTank.app/Contents/MacOS/{ClawTank,clawtank-mcp}`; both should report `x86_64`.
+3. Connect with an RDP client, move windows, and verify that video appears. If the hardware encoder is unavailable, ClawTank should try the regular VideoToolbox encoder, then software H.264; note CPU usage in your report.
+4. Try **Physical display** first, then **Virtual display**. Virtual display creation depends on a private macOS API and may not work on every Intel model. For headless Intel systems, report whether a virtual display starts without a monitor.
 
 ## 7. Away from home (optional)
 - **Tailscale:** follow [remote-access.md](remote-access.md). Connect over mobile data, with Wi-Fi off on the client.

@@ -6,11 +6,16 @@ DERIVED := app/build
 APP := $(DERIVED)/Build/Products/$(CONFIG)/ClawTank.app
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' core/Cargo.toml | head -1)
 
-.PHONY: build core app project test test-core test-app lint audit package release clean spike-vd dev-signing bench
+.PHONY: build core app project test test-core test-app lint audit package release clean spike-vd dev-signing bench check-arch
 
 build: app ## Build Rust core + macOS app
 
-core: ## Build the Rust static library and regenerate the C header
+# Rust and Swift must use the same native architecture (thin builds).
+# To build for another architecture, use a runner/Mac with that CPU.
+check-arch:
+	@test "$(ARCH)" = "$(shell uname -m)" || { echo "error: ARCH=$(ARCH) differs from host $(shell uname -m); use a native Mac" >&2; exit 1; }
+
+core: check-arch ## Build the Rust static library and regenerate the C header
 	cd core && cargo build --release
 
 project: ## Generate the Xcode project from app/project.yml
@@ -29,7 +34,7 @@ dev-signing: ## One-time: create the local "ClawTank Dev" signing identity (ADR-
 
 test: test-core test-app ## Run all unit tests
 
-test-core:
+test-core: check-arch
 	cd core && cargo test
 
 # Each run replaces one result bundle; Xcode would otherwise keep every run under Logs/ (GBs).
@@ -55,7 +60,7 @@ audit: ## RustSec advisory check
 	cd core && cargo audit
 
 package: build ## Unsigned (ad-hoc) DMG in dist/
-	scripts/package-dmg.sh "$(APP)" "dist/ClawTank-$(VERSION).dmg"
+	scripts/package-dmg.sh "$(APP)" "dist/ClawTank-$(VERSION)-$(ARCH).dmg"
 
 # Release builds are ad-hoc signed (never with the local dev identity) unless Developer ID
 # credentials are set; see scripts/release.sh and docs/releasing.md.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds release artifacts from an already-built ClawTank.app:
-#   dist/ClawTank-<version>-<arch>.dmg, dist/clawtank-mcp-<version>-arm64.mcpb, dist/server.json,
+#   dist/ClawTank-<version>-<arch>.dmg, dist/clawtank-mcp-<version>-<arch>.mcpb, dist/server.json,
 #   dist/SHA256SUMS, dist/RELEASE_NOTES.md
 # and verifies them (DMG integrity, signature, architecture, versions).
 #
@@ -24,8 +24,20 @@ app_version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$p
 }
 grep -q "^## \[$version\]" CHANGELOG.md || { echo "error: CHANGELOG.md has no [$version] section" >&2; exit 1; }
 
-arch="$(lipo -archs "$app/Contents/MacOS/ClawTank" | tr ' ' '+')"
-dmg="dist/ClawTank-$version-${arch/x86_64+arm64/universal}.dmg"
+# A DMG must not pair an Intel app with an Apple-silicon-only MCP executable.
+app_archs="$(lipo -archs "$app/Contents/MacOS/ClawTank")"
+mcp_archs="$(lipo -archs "$app/Contents/MacOS/clawtank-mcp")"
+normalize_archs() { tr ' ' '\n' | sort | tr '\n' ' '; }
+[[ "$(printf '%s' "$app_archs" | normalize_archs)" == "$(printf '%s' "$mcp_archs" | normalize_archs)" ]] || {
+    echo "error: app architecture ($app_archs) != MCP architecture ($mcp_archs)" >&2; exit 1
+}
+case "$app_archs" in
+    arm64) arch="arm64" ;;
+    x86_64) arch="x86_64" ;;
+    "arm64 x86_64"|"x86_64 arm64") arch="universal" ;;
+    *) echo "error: unsupported app architecture: $app_archs" >&2; exit 1 ;;
+esac
+dmg="dist/ClawTank-$version-$arch.dmg"
 rm -rf dist && mkdir -p dist
 
 if [[ -n "${CLAWTANK_SIGN_IDENTITY:-}" ]]; then
@@ -61,7 +73,7 @@ trap - EXIT
 rmdir "$mount"
 
 # The MCP server as an MCP Bundle for Claude Desktop and the MCP Registry (docs/releasing.md).
-mcpb="dist/clawtank-mcp-$version-arm64.mcpb"
+mcpb="dist/clawtank-mcp-$version-$arch.mcpb"
 scripts/package-mcpb.sh "$version" "$app/Contents/MacOS/clawtank-mcp" "$mcpb" >/dev/null
 
 (cd dist && shasum -a 256 "$(basename "$dmg")" "$(basename "$mcpb")" > SHA256SUMS)
@@ -86,7 +98,7 @@ scripts/package-mcpb.sh "$version" "$app/Contents/MacOS/clawtank-mcp" "$mcpb" >/
     fi
     echo "3. Follow the setup window: Screen Recording, Accessibility and a password, then connect from any RDP client."
     echo
-    echo "Requires macOS 14 Sonoma or later on $( [[ "$arch" == arm64 ]] && echo "Apple silicon" || echo "$arch" )."
+    echo "Requires macOS 14 Sonoma or later ($arch build). Intel support is currently in beta."
     echo
     echo "SHA-256: \`$(head -1 dist/SHA256SUMS | cut -d' ' -f1)\`"
 } > dist/RELEASE_NOTES.md
