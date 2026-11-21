@@ -4,7 +4,8 @@
 # Usage: tests/freerdp-smoke.sh <path/to/testserver>
 # Needs FreeRDP 3 (xfreerdp3 / xfreerdp) and, for the full-session check, xvfb-run.
 # Checks: (1) NLA succeeds with the right password, (2) NLA fails with a wrong one,
-# (3) a full session starts, receives the test frame, and disconnects cleanly.
+# (3) a full session stays connected after graphics negotiation and disconnects cleanly.
+# Legacy bitmap rendering and EGFX bitstream delivery are covered by Rust integration tests.
 set -euo pipefail
 
 server_bin="$1"
@@ -50,14 +51,21 @@ if "$freerdp" "${common[@]}" /p:wrong-password /auth-only; then
     fail "auth-only with wrong password succeeded"
 fi
 
-echo "3/3 full session (legacy bitmap fallback; EGFX is covered by core integration tests)"
-# This standalone testserver has no H.264 producer. Disable EGFX so the initial
-# test-pattern bitmap is the expected transport rather than an empty EGFX stream.
-xvfb-run -a "$freerdp" "${common[@]}" /p:"$pass" /size:1280x720 -gfx >/dev/null 2>&1 &
+echo "3/3 full session"
+# The standalone testserver deliberately has no H.264 frame producer. FreeRDP can
+# negotiate EGFX even with -gfx, so the new startup logic rightly skips the bitmap.
+# Assert the client negotiates a graphics path and stays connected instead; Rust
+# integration tests verify the bitmap pixels and EGFX H.264 payload separately.
+xvfb-run -a "$freerdp" "${common[@]}" /p:"$pass" /size:1280x720 >/dev/null 2>&1 &
 client_pid=$!
 wait_for "EVENT connected" 20 || fail "session did not start"
-wait_for "Sending test frame" 10 || fail "test frame was not sent"
+if ! wait_for "EVENT video-start" 10 && ! wait_for "Sending test frame" 1; then
+    fail "neither EGFX nor the legacy test frame became available"
+fi
 sleep 2
+if grep -q "EVENT disconnected" "$log"; then
+    fail "client disconnected before the smoke test ended"
+fi
 # xvfb-run is a wrapper script: stop the FreeRDP process itself, not just the wrapper.
 pkill -f "/v:127.0.0.1:$port" 2>/dev/null || true
 kill "$client_pid" 2>/dev/null || true
@@ -65,4 +73,4 @@ wait "$client_pid" 2>/dev/null || true
 client_pid=""
 wait_for "EVENT disconnected" 10 || fail "disconnect not observed"
 
-echo "PASS: FreeRDP connected with NLA, received the test frame, and disconnected"
+echo "PASS: FreeRDP connected with NLA, negotiated graphics, stayed connected, and disconnected"
