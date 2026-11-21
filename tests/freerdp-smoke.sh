@@ -50,8 +50,10 @@ if "$freerdp" "${common[@]}" /p:wrong-password /auth-only; then
     fail "auth-only with wrong password succeeded"
 fi
 
-echo "3/3 full session"
-xvfb-run -a "$freerdp" "${common[@]}" /p:"$pass" /size:1280x720 >/dev/null 2>&1 &
+echo "3/3 full session (legacy bitmap fallback; EGFX is covered by core integration tests)"
+# This standalone testserver has no H.264 producer. Disable EGFX so the initial
+# test-pattern bitmap is the expected transport rather than an empty EGFX stream.
+xvfb-run -a "$freerdp" "${common[@]}" /p:"$pass" /size:1280x720 -gfx >/dev/null 2>&1 &
 client_pid=$!
 wait_for "EVENT connected" 20 || fail "session did not start"
 wait_for "Sending test frame" 10 || fail "test frame was not sent"
