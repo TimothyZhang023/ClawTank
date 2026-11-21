@@ -192,6 +192,60 @@ impl RdpServerDisplayUpdates for TestPatternUpdates {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn skips_oversized_legacy_frame_when_egfx_becomes_ready() {
+        let video = Arc::new(VideoHub::new(Arc::new(|_| {})));
+        let (pointer_tx, pointer_rx) = unbounded_channel();
+        let mut updates = TestPatternUpdates {
+            size: DesktopSize {
+                width: 2776,
+                height: 1938,
+            },
+            sent: false,
+            pointer: pointer_rx,
+            video: Arc::clone(&video),
+            initial_frame_deadline: tokio::time::Instant::now() + Duration::from_millis(40),
+        };
+        // The EGFX channel becomes ready while the initial legacy frame is deferred.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            video.on_ready();
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), updates.next_update())
+                .await
+                .is_err(),
+            "EGFX must not receive the oversized legacy bitmap"
+        );
+        assert!(updates.sent);
+        drop(pointer_tx);
+    }
+
+    #[tokio::test]
+    async fn small_legacy_client_still_receives_test_pattern() {
+        let video = Arc::new(VideoHub::new(Arc::new(|_| {})));
+        let (_pointer_tx, pointer_rx) = unbounded_channel();
+        let mut updates = TestPatternUpdates {
+            size: DesktopSize {
+                width: 640,
+                height: 480,
+            },
+            sent: false,
+            pointer: pointer_rx,
+            video,
+            initial_frame_deadline: tokio::time::Instant::now(),
+        };
+        let update = updates.next_update().await.unwrap().unwrap();
+        match update {
+            DisplayUpdate::Bitmap(bitmap) => {
+                assert_eq!(bitmap.width.get(), 640);
+                assert_eq!(bitmap.height.get(), 480);
+                assert_eq!(bitmap.data.len(), 640 * 480 * 4);
+            }
+            _ => panic!("expected an initial bitmap update"),
+        }
+    }
+
     #[test]
     fn sizes_are_clamped() {
         let s = clamp_size(DesktopSize {
