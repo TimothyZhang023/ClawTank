@@ -9,7 +9,12 @@ version="$1"
 binary="$2"
 out="$3"
 [[ -x "$binary" ]] || { echo "error: $binary not found or not executable" >&2; exit 1; }
-[[ "$(lipo -archs "$binary")" == arm64 ]] || { echo "error: expected an arm64 binary" >&2; exit 1; }
+# Allow native Intel/Apple silicon or a universal macOS executable.
+archs="$(lipo -archs "$binary")"
+case "$archs" in
+    arm64|x86_64|"arm64 x86_64"|"x86_64 arm64") ;;
+    *) echo "error: unsupported MCP binary architecture: $archs" >&2; exit 1 ;;
+esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
 

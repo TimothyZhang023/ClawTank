@@ -96,6 +96,42 @@ final class H264EncoderTests: XCTestCase {
         XCTAssertTrue(frames.allSatisfy { $0.encodeDuration >= 0 })
     }
 
+    func testEncoderFallbackOrder() {
+        var settings = H264Encoder.Settings(width: 640, height: 368, averageBitRate: 4_000_000,
+                                            lowLatencyRateControl: true)
+        XCTAssertEqual(H264Encoder.encoderConfigurations(for: settings), [
+            .init(lowLatencyRateControl: true, requireHardware: true),
+            .init(lowLatencyRateControl: false, requireHardware: true)
+        ])
+        settings.allowSoftwareFallback = true
+        XCTAssertEqual(H264Encoder.encoderConfigurations(for: settings), [
+            .init(lowLatencyRateControl: true, requireHardware: true),
+            .init(lowLatencyRateControl: false, requireHardware: true),
+            .init(lowLatencyRateControl: false, requireHardware: false)
+        ])
+        settings.lowLatencyRateControl = false
+        XCTAssertEqual(H264Encoder.encoderConfigurations(for: settings), [
+            .init(lowLatencyRateControl: false, requireHardware: true),
+            .init(lowLatencyRateControl: false, requireHardware: false)
+        ])
+        settings.requireHardware = false
+        XCTAssertEqual(H264Encoder.encoderConfigurations(for: settings), [
+            .init(lowLatencyRateControl: false, requireHardware: false)
+        ])
+    }
+
+    func testHardwarePreferredWithSoftwareFallback() throws {
+        let sink = FrameSink()
+        let settings = H264Encoder.Settings(width: 640, height: 368, averageBitRate: 4_000_000,
+                                            lowLatencyRateControl: true, allowSoftwareFallback: true)
+        let encoder = try H264Encoder(settings: settings) { sink.append($0) }
+        encoder.encode(SyntheticFrames.make(width: 640, height: 368, index: 1),
+                       presentationTime: .zero, forceKeyframe: true)
+        encoder.flush()
+        XCTAssertEqual(sink.all.count, 1)
+        XCTAssertTrue(sink.all[0].isKeyframe)
+    }
+
     func testRejectsUnalignedSizeAtTheBoundary() {
         XCTAssertEqual(H264Encoder.Settings.aligned(1) % 16, 0)
         XCTAssertGreaterThanOrEqual(

@@ -4,14 +4,14 @@
 
 1. Set the version in **both** `core/Cargo.toml` (`[workspace.package] version`) and `app/project.yml` (`CFBundleShortVersionString`, and bump `CFBundleVersion`).
 2. Move the changes under a `## [x.y.z] - YYYY-MM-DD` heading in `CHANGELOG.md`. The release notes are generated from it.
-3. Run `make lint test`, then `make release`. This creates the following in `dist/`:
-   - `ClawTank-x.y.z-arm64.dmg`: the app plus an /Applications link
-   - `clawtank-mcp-x.y.z-arm64.mcpb`: the MCP server as an MCP Bundle (Claude Desktop, MCP Registry)
+3. On an Intel Mac run `make lint test && make release` to create x86_64 artifacts; on Apple silicon the same commands create arm64 artifacts. The output in `dist/` includes:
+   - `ClawTank-x.y.z-<arch>.dmg`: the app plus an /Applications link
+   - `clawtank-mcp-x.y.z-<arch>.mcpb`: the MCP server as an MCP Bundle (Claude Desktop); `<arch>` is `x86_64` or `arm64`
    - `server.json`: the MCP Registry entry for that bundle, with its SHA-256
    - `SHA256SUMS`
    - `RELEASE_NOTES.md`: the changelog section plus install steps
 
-   The script refuses to run if the versions differ or the changelog section is missing. It verifies the DMG (integrity, layout, deep code signature, bundled `clawtank-mcp`).
+   The script refuses mismatched app/MCP architectures, versions or a missing changelog section. It verifies the DMG (integrity, layout, deep code signature, bundled `clawtank-mcp`). CI builds both architectures using `macos-15-intel` and `macos-15`.
 
    Release builds go to `build/release/`, so they never replace your dev-signed `app/build` app and its permissions.
 4. Create a **draft** GitHub Release and review it before publishing:
@@ -23,7 +23,7 @@
 
 ## MCP Registry
 
-After the release is published (the registry needs the `.mcpb` download URL to work), copy `dist/server.json` over the repo's `server.json`, commit it, and publish with [`mcp-publisher`](https://github.com/modelcontextprotocol/registry/releases):
+After the release is published (the registry needs the `.mcpb` download URL to work), publish a **universal** MCP bundle for the registry, or use an architecture-specific bundle only for users on that architecture. A registry entry pointing to an arm64-only bundle will not work on Intel. `scripts/package-mcpb.sh` accepts thin x86_64/arm64 or universal binaries and generates `dist/server.json` for the supplied bundle. Once a suitable bundle is selected, copy that JSON into the repo and publish with [`mcp-publisher`](https://github.com/modelcontextprotocol/registry/releases):
 
 ```sh
 mcp-publisher login github   # once; signs in as HMAKT99, which owns io.github.HMAKT99/*

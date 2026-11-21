@@ -5,7 +5,7 @@
 [![CI](https://github.com/HMAKT99/ClawTank/actions/workflows/ci.yml/badge.svg)](https://github.com/HMAKT99/ClawTank/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/HMAKT99/ClawTank?include_prereleases&label=release)](https://github.com/HMAKT99/ClawTank/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![Platform: macOS 14+ on Apple silicon](https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20silicon-lightgrey)
+![Platform: macOS 14+ on Apple silicon and Intel](https://img.shields.io/badge/macOS-14%2B%20%C2%B7%20Apple%20silicon%20%2B%20Intel-lightgrey)
 
 [Install](#install) · [Connect](#connect) · [FAQ](#faq) · [Troubleshooting](#troubleshooting) · [Documentation](docs/README.md) · [Help test the beta](#help-test-the-beta)
 
@@ -26,7 +26,7 @@ ClawTank is a native RDP server for macOS. Connect from any standard Remote Desk
 
 ## Features
 
-- **Fast:** H.264 video encoded by the Mac's media engine and sent over the RDP graphics pipeline. About 60 fps at under 10% CPU on Apple silicon.
+- **Fast:** H.264 over RDP, with hardware encoding preferred and a software fallback on Intel Macs. About 60 fps at under 10% CPU was measured on Apple silicon; Intel performance depends on its encoder.
 - **Fits your screen:** the desktop resizes live to the client's window. Retina virtual displays give crisp text, and a headless Mac needs no dummy HDMI plug.
 - **Feels local:**
   - keyboard and mouse, including scroll, middle and back/forward buttons
@@ -58,9 +58,9 @@ Based on each product's public documentation. Corrections are welcome. "—" mea
 
 ## Install
 
-**Requirements:** macOS 14 Sonoma or later, on Apple silicon. Intel Macs: build from source (untested).
+**Requirements:** macOS 14 Sonoma or later on Apple silicon (arm64) or Intel (x86_64). Intel support is **beta**; real-device video and headless behavior still need validation.
 
-1. Download `ClawTank-<version>-arm64.dmg` from [Releases](https://github.com/HMAKT99/ClawTank/releases). Optionally check it against `SHA256SUMS`:
+1. Choose the DMG for your Mac: `ClawTank-<version>-arm64.dmg` for Apple silicon, or `ClawTank-<version>-x86_64.dmg` for Intel. If an Intel DMG hasn't been published yet, [build it from source](#building-from-source) with `make build && make package`. Optionally check published files against `SHA256SUMS`:
    ```sh
    shasum -a 256 ~/Downloads/ClawTank-*.dmg
    ```
@@ -168,7 +168,7 @@ No. ClawTank makes no network connections of its own. It only accepts incoming R
 ## Known limitations
 
 - One monitor per session: a multi-monitor client gets one resizable desktop. No AVC444 (full-colour 4:4:4) yet; Retina sessions give crisp text instead.
-- Not notarized yet, so you need the one-time "Open Anyway" step. Apple silicon builds only.
+- Not notarized yet, so you need the one-time "Open Anyway" step. On Intel, VideoToolbox falls back to ordinary hardware encoding and then software H.264 if needed; software encoding uses more CPU. Virtual displays use a private API and may be unavailable on some Intel systems (use Physical display if so).
 - No automatic updates yet: watch [Releases](https://github.com/HMAKT99/ClawTank/releases) on GitHub.
 - See [CHANGELOG.md](CHANGELOG.md) and [docs/testing.md](docs/testing.md) for what's been verified.
 
@@ -189,14 +189,15 @@ We're looking for people to try 0.9 on real setups: Windows and Mac clients, iPa
 Requirements: macOS 14+, Xcode 16+, Rust (stable, via rustup), `brew install xcodegen swiftlint`.
 
 ```sh
-make build        # Rust core + ClawTank.app (app/build/Build/Products/Release/)
+make build        # Native Rust core + ClawTank.app (app/build/Build/Products/Release/)
 make dev-signing  # one-time: a local signing identity so permissions survive rebuilds
 make test         # cargo test + XCTest
 make lint         # clippy -D warnings, rustfmt, swiftlint
-make release      # versioned DMG + SHA256SUMS + release notes in dist/
+make package      # dist/ClawTank-<version>-<arch>.dmg
+make release      # versioned DMG + MCP bundle + SHA256SUMS in dist/
 ```
 
-To work in Xcode, run `make core project`, then open `app/ClawTank.xcodeproj`. Architecture: [docs/architecture.md](docs/architecture.md). Design decisions: [docs/decisions.md](docs/decisions.md).
+Build natively on the target architecture: run these commands on an Intel Mac to get x86_64 binaries, or on Apple silicon for arm64 (the Makefile rejects mixed-architecture builds). Run `uname -m` to check. To work in Xcode, run `make core project`, then open `app/ClawTank.xcodeproj`. Architecture: [docs/architecture.md](docs/architecture.md). Design decisions: [docs/decisions.md](docs/decisions.md).
 
 ## Contributing
 

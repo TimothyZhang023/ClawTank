@@ -10,7 +10,16 @@ permissions:
 
 jobs:
   build-test:
-    runs-on: macos-15
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -20,20 +29,35 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: core
+      - name: Verify runner CPU
+        run: test "$(uname -m)" = "${{ matrix.arch }}"
       - name: Install tools
         run: brew install xcodegen swiftlint
       - name: Lint
         run: make lint
       - name: Build
-        run: make build
+        run: make build ARCH=${{ matrix.arch }}
       - name: Test
-        run: make test
+        run: make test ARCH=${{ matrix.arch }}
+      - name: Check both binaries' architecture
+        run: |
+          app="app/build/Build/Products/Release/ClawTank.app/Contents/MacOS"
+          test "$(lipo -archs "$app/ClawTank")" = "${{ matrix.arch }}"
+          test "$(lipo -archs "$app/clawtank-mcp")" = "${{ matrix.arch }}"
       - name: Package (unsigned)
-        run: make package
+        run: make package ARCH=${{ matrix.arch }}
+      - name: Package MCP bundle and check tool introspection
+        run: |
+          version="$(awk -F '"' '/^version = "/ { print $2; exit }' core/Cargo.toml)"
+          scripts/package-mcpb.sh "$version" \
+            app/build/Build/Products/Release/ClawTank.app/Contents/MacOS/clawtank-mcp \
+            "dist/clawtank-mcp-$version-${{ matrix.arch }}.mcpb"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ClawTank-dmg
-          path: dist/*
+          name: ClawTank-${{ matrix.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.mcpb
 
   freerdp-interop:
     # The core is portable Rust, so the independent-client check runs on Linux with FreeRDP 3.

@@ -76,16 +76,26 @@ final class VideoSession: @unchecked Sendable {
 
     func start() async throws {
         let baseRate = H264Encoder.Settings.defaultBitRate(width: codedWidth, height: codedHeight, frameRate: frameRate)
+        // VideoToolbox's low-latency H.264 encoder is not available on every Intel GPU.
+        // Prefer hardware as before, but let x86_64 hosts use software when necessary.
+        #if arch(x86_64)
+        let allowSoftwareFallback = true
+        #else
+        let allowSoftwareFallback = false
+        #endif
         let settings = H264Encoder.Settings(
             width: codedWidth, height: codedHeight, frameRate: frameRate,
             averageBitRate: max(1_000_000, Int(Double(baseRate) * bitRateFactor)),
-            lowLatencyRateControl: true)  // ADR-016: tighter p95 encode latency
+            lowLatencyRateControl: true, allowSoftwareFallback: allowSoftwareFallback)
         lock.withLock { adaptive = AdaptiveBitrate(target: settings.averageBitRate) }
         let encoder = try H264Encoder(settings: settings) { [weak self] frame in
             self?.deliver(frame)
         }
         self.encoder = encoder
         log.info("Encoder \(settings.width)x\(settings.height) \(encoder.encoderID, privacy: .public)")
+        if !encoder.isHardwareAccelerated {
+            log.warning("Hardware H.264 unavailable; using VideoToolbox software encoder (higher CPU usage)")
+        }
 
         let capture = ScreenCapture(
             onFrame: { [weak self] buffer, time in self?.handle(buffer, time) },
