@@ -385,7 +385,8 @@ extension ServerController {
                 displays.release()
                 return
             }
-            displayDescription = "\(target.isVirtual ? "Virtual" : "Physical") display \(request.width)×\(request.height)"
+            let displayKind = target.isVirtual ? "Virtual" : "Physical"
+            displayDescription = "\(displayKind) display \(request.width)×\(request.height)"
             session?.resolution = "\(request.width)×\(request.height)"
             log.info("Video \(request.width)x\(request.height)@\(request.frameRate) on \(target.displayID)")
         } catch {
