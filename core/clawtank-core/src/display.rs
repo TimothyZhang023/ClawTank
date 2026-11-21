@@ -185,13 +185,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn skips_oversized_legacy_frame_when_egfx_becomes_ready() {
+    async fn skips_legacy_frame_for_small_egfx_clients() {
         let video = Arc::new(VideoHub::new(Arc::new(|_| {})));
         let (pointer_tx, pointer_rx) = unbounded_channel();
         let mut updates = TestPatternUpdates {
             size: DesktopSize {
-                width: 2776,
-                height: 1938,
+                width: 640,
+                height: 480,
             },
             sent: false,
             pointer: pointer_rx,
@@ -207,7 +207,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), updates.next_update())
                 .await
                 .is_err(),
-            "EGFX must not receive the oversized legacy bitmap"
+            "EGFX must not receive an early legacy bitmap at any resolution"
         );
         assert!(updates.sent);
         drop(pointer_tx);
