@@ -190,6 +190,7 @@ async fn retina_sized_egfx_session_reaches_first_frame() {
     .expect("Retina-sized RDP connection");
 
     let mut submitted = false;
+    let connection_started = std::time::Instant::now();
     let ok = client::pump_until(result, &mut session, Duration::from_secs(20), {
         let events = Arc::clone(&events);
         let recorder = recorder.clone();
@@ -211,7 +212,10 @@ async fn retina_sized_egfx_session_reaches_first_frame() {
                 );
                 submitted = true;
             }
+            // Stay connected beyond the initial legacy-frame grace period to detect
+            // premature protocol disconnects rather than stopping at the first H.264 frame.
             recorder.frame_count() >= 1
+                && connection_started.elapsed() >= Duration::from_millis(1500)
         }
     })
     .await
