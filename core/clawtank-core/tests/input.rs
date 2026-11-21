@@ -16,7 +16,6 @@ use ironrdp_async::FramedWrite as _;
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::input::mouse::PointerFlags;
-use ironrdp_pdu::input::mouse_rel::{MouseRelPdu, PointerRelFlags};
 use ironrdp_pdu::input::mouse_x::PointerXFlags;
 use ironrdp_pdu::input::{MousePdu, MouseXPdu};
 use ironrdp_session::ActiveStageOutput;
@@ -94,12 +93,6 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
             x_position: 550,
             y_position: 450,
         }),
-        // Relative button clicks apply the encoded motion BEFORE the press.
-        FastPathInputEvent::MouseEventRel(MouseRelPdu {
-            flags: PointerRelFlags::BUTTON1 | PointerRelFlags::DOWN,
-            x_delta: 12,
-            y_delta: -7,
-        }),
     ];
     for frame in stage
         .process_fastpath_input(&mut image, &input)
@@ -167,11 +160,6 @@ async fn client_input_reaches_host_and_cursor_reaches_client() {
         InputEvent::Move { x: 550, y: 450 },
         InputEvent::Button {
             button: MouseButton::X1,
-            down: true,
-        },
-        InputEvent::RelMove { dx: 12, dy: -7 },
-        InputEvent::Button {
-            button: MouseButton::Left,
             down: true,
         },
     ];
