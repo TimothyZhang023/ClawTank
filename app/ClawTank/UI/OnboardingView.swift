@@ -64,9 +64,14 @@ struct OnboardingView: View {
             Header(title: "Allow Accessibility", symbol: "keyboard")
             Text("To type and click for you, ClawTank needs Accessibility. Turn on ClawTank in the list.")
             PermissionRow(granted: accessibilityGranted, action: "Open Accessibility Settings") {
-                let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-                _ = AXIsProcessTrustedWithOptions(options)
+                // Opening Settings is explicit; don't also request a redundant system prompt.
                 open("Privacy_Accessibility")
+            }
+            if !accessibilityGranted {
+                Text("Already enabled? Remove the old ClawTank entry, add " +
+                     "/Applications/ClawTank.app again, then quit and reopen ClawTank. " +
+                     "Ad-hoc test builds need fresh permission after replacement.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         case .password:
             Header(title: "Choose a Password", symbol: "lock")

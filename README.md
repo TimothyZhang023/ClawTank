@@ -146,6 +146,8 @@ The APIs ClawTank needs (input injection, virtual displays) aren't allowed in sa
 **macOS asks for permissions again after I update.**
 Unsigned (ad-hoc) builds get a new code identity every release, so macOS treats each update as a new app. Re-enable ClawTank under **Privacy & Security → Screen Recording / Accessibility** (remove the old entry first if it's there). Developer ID-signed builds will keep their permissions.
 
+If **Accessibility is enabled but ClawTank still says permission is missing**, quit ClawTank. In **System Settings → Privacy & Security → Accessibility**, remove the stale ClawTank entry and use **+** to select the installed **/Applications/ClawTank.app** (not a copy inside the DMG). Enable it and restart ClawTank. The app now checks permission silently on connection; open **Menu → Setup Guide…** to return to the permission page. This may be needed again after installing another ad-hoc beta; local developer builds can instead use `make dev-signing` and a stable signing identity.
+
 **Does it phone home?**
 No. ClawTank makes no network connections of its own. It only accepts incoming RDP connections, plus optional local Agent API calls on 127.0.0.1.
 

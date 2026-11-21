@@ -284,12 +284,13 @@ final class ServerController: ObservableObject {
     // MARK: - Input and cursor
 
     private func startInput() {
-        // Shows the system prompt the first time; input is ignored until granted.
-        // "AXTrustedCheckOptionPrompt" is the value of kAXTrustedCheckOptionPrompt (a C global).
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        if !AXIsProcessTrustedWithOptions(options) {
-            lastNotice = "Grant Accessibility to ClawTank in System Settings to enable keyboard and mouse"
-            log.notice("Accessibility not granted; input is ignored")
+        // Query trust without requesting another system dialog on every RDP connection.
+        // On ad-hoc builds, macOS may consider the current code signature a new app even
+        // if an older ClawTank entry still appears enabled in Accessibility Settings.
+        // The Setup Guide provides the explicit permission-recovery action.
+        if !AXIsProcessTrusted() {
+            lastNotice = "Accessibility not trusted for this build. Re-add ClawTank in System Settings"
+            log.notice("Accessibility not trusted; remote input will be ignored until granted")
         }
         guard let server, cursor == nil else { return }
         let input = self.input

@@ -55,6 +55,10 @@ xvfb-run -a "$freerdp" "${common[@]}" /p:"$pass" /size:1280x720 >/dev/null 2>&1 
 client_pid=$!
 wait_for "EVENT connected" 20 || fail "session did not start"
 wait_for "Sending test frame" 10 || fail "test frame was not sent"
+if [[ "${CLAWTANK_DISABLE_EGFX:-}" == "1" ]]; then
+    wait_for "Diagnostic mode: EGFX disabled" 2 || fail "missing legacy-only diagnostic flag"
+    ! grep -q "EGFX ready" "$log" || fail "EGFX unexpectedly enabled"
+fi
 sleep 2
 # xvfb-run is a wrapper script: stop the FreeRDP process itself, not just the wrapper.
 pkill -f "/v:127.0.0.1:$port" 2>/dev/null || true

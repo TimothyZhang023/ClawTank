@@ -111,3 +111,30 @@ Live, 2026-10-21, loopback, `files_demo` (examples/files_demo.rs) acting as the 
 ## MCP Bundle
 - `scripts/package-mcpb.sh` checks that the bundled server starts and lists its tools. 2026-10-23: the 0.9.0 bundle lists all 12 tools and passes `mcpb validate` and `mcp-publisher validate`.
 - [ ] Human: double-click the `.mcpb` with Claude Desktop installed, enter a token, and ask Claude for a screenshot of the Mac.
+
+## Intel + AMD dual-GPU Mac: iOS Windows App graphics protocol isolation
+
+If the iOS Windows App reports a protocol error immediately after `EGFX ready`, run a
+**diagnostic legacy-only session** to distinguish the graphics-extension handshake from
+VideoToolbox capture/encoding. This option does not change the normal default.
+
+Quit ClawTank, then launch the app executable from Terminal:
+
+```sh
+CLAWTANK_DISABLE_EGFX=1 /Applications/ClawTank.app/Contents/MacOS/ClawTank
+```
+
+The log should show `Diagnostic mode: EGFX disabled`. The iOS client should receive
+only the **static color-bar test pattern**, not the live macOS desktop, because the
+H.264 video pipeline intentionally never starts in this mode. This is strictly a
+protocol diagnostic, not a replacement for the normal remote-desktop implementation.
+
+- If the color bars remain connected, investigate IronRDP EGFX DVC initialization,
+  capability negotiation and message ordering before investigating GPU selection.
+- If iOS still disconnects with a protocol error, the problem also affects the
+  legacy RDP graphics or another negotiated channel; capture its error details.
+- Compare with a normal launch (without the environment variable) on the same iOS client.
+
+If possible, also include `system_profiler SPDisplaysDataType` output when reporting
+results from Intel Macs with both integrated Intel and discrete AMD graphics. The
+VideoToolbox encoder may not run at all before the iOS client disconnects.
