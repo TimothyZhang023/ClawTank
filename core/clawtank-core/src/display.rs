@@ -11,6 +11,7 @@
 
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use ironrdp_displaycontrol::pdu::DisplayControlMonitorLayout;
@@ -36,6 +37,13 @@ const DEFAULT_SIZE: DesktopSize = DesktopSize {
 const MAX_WIDTH: u16 = 8192;
 const MAX_HEIGHT: u16 = 8192;
 const MIN_SIDE: u16 = 200;
+
+/// Large uncompressed legacy bitmaps can exceed what some iOS RDP clients tolerate,
+/// especially when they offer EGFX but the first AVC frame is still being prepared.
+/// Give EGFX negotiation a chance before sending the legacy test image; clients without
+/// EGFX still receive it, so the fallback path remains intact.
+const LARGE_LEGACY_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const EGFX_NEGOTIATION_GRACE: Duration = Duration::from_millis(500);
 
 /// Serves the static test pattern.
 pub struct TestPatternDisplay {
@@ -113,6 +121,8 @@ impl RdpServerDisplay for TestPatternDisplay {
             size: self.size,
             sent: false,
             pointer: rx,
+            video: Arc::clone(&self.video),
+            initial_frame_deadline: tokio::time::Instant::now() + EGFX_NEGOTIATION_GRACE,
         }))
     }
 }
@@ -121,6 +131,9 @@ struct TestPatternUpdates {
     size: DesktopSize,
     sent: bool,
     pointer: UnboundedReceiver<DisplayUpdate>,
+    video: Arc<VideoHub>,
+    /// Fixed deadline makes the wait cancellation-safe when IronRDP polls this future in select!.
+    initial_frame_deadline: tokio::time::Instant,
 }
 
 impl TestPatternUpdates {
@@ -143,13 +156,28 @@ impl TestPatternUpdates {
 impl RdpServerDisplayUpdates for TestPatternUpdates {
     async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
         if !self.sent {
+            let frame_bytes = usize::from(self.size.width) * usize::from(self.size.height) * 4;
+            if frame_bytes > LARGE_LEGACY_FRAME_BYTES {
+                // The iOS Windows App can negotiate EGFX before VideoToolbox has produced
+                // its first AVC frame. Avoid sending a ~20 MiB legacy bitmap in that gap.
+                // If the client has no EGFX support, continue with the original test frame.
+                tokio::time::sleep_until(self.initial_frame_deadline).await;
+            }
             self.sent = true;
-            info!(
-                width = self.size.width,
-                height = self.size.height,
-                "Sending test frame"
-            );
-            return Ok(Some(self.frame()));
+            if frame_bytes > LARGE_LEGACY_FRAME_BYTES && self.video.is_channel_open() {
+                info!(
+                    width = self.size.width,
+                    height = self.size.height,
+                    "EGFX ready; skipping oversized legacy test frame"
+                );
+            } else {
+                info!(
+                    width = self.size.width,
+                    height = self.size.height,
+                    "Sending test frame"
+                );
+                return Ok(Some(self.frame()));
+            }
         }
         // After the frame, only cursor shapes flow here (video goes over EGFX). Never return
         // `None` (that ends the session): if the pointer source goes away, just idle.
