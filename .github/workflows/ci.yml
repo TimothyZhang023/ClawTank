@@ -81,6 +81,8 @@ jobs:
             | target/debug/clawtank-mcp | grep -q '"tools":\['
       - name: FreeRDP smoke test
         run: tests/freerdp-smoke.sh core/target/debug/examples/testserver
+      - name: FreeRDP legacy graphics diagnostic test (EGFX disabled)
+        run: CLAWTANK_DISABLE_EGFX=1 PORT=33892 tests/freerdp-smoke.sh core/target/debug/examples/testserver
 
   audit:
     runs-on: ubuntu-latest

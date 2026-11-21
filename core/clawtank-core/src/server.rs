@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use std::sync::Arc;
 
-use ironrdp_server::{Credentials, RdpServer, ServerEvent};
+use ironrdp_server::{Credentials, GfxServerFactory, RdpServer, ServerEvent};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc::UnboundedSender, watch};
 use tracing::{error, info, warn};
@@ -152,6 +152,13 @@ pub fn start(config: ServerConfig, sink: EventSink, input: InputSink) -> Result<
     let (thread_audio, thread_clipboard) = (Arc::clone(&audio), Arc::clone(&clipboard));
     let thread_pointer = Arc::clone(&pointer);
     let thread_video = Arc::clone(&video);
+    // Diagnostic switch: when enabled, clients receive only the legacy test pattern.
+    // In particular, no EGFX DVC is attached and no VideoStart event is emitted.
+    // Leave the default unchanged so normal builds retain hardware-accelerated video.
+    let disable_egfx = std::env::var("CLAWTANK_DISABLE_EGFX").is_ok_and(|value| value == "1");
+    if disable_egfx {
+        warn!("Diagnostic mode: EGFX disabled (CLAWTANK_DISABLE_EGFX=1)");
+    }
     let (shutdown, mut shutdown_rx) = watch::channel(false);
     // RdpServer is not Send, so it is built on the server thread; its quit sender comes back here.
     let (quit_tx, quit_rx) = std::sync::mpsc::sync_channel(1);
@@ -175,7 +182,10 @@ pub fn start(config: ServerConfig, sink: EventSink, input: InputSink) -> Result<
                     thread_pointer,
                 ))
                 .with_honor_client_desktop_size(true)
-                .with_gfx_factory(Some(Box::new(GfxFactory::new(Arc::clone(&thread_video)))))
+                .with_gfx_factory((!disable_egfx).then(|| {
+                    Box::new(GfxFactory::new(Arc::clone(&thread_video)))
+                        as Box<dyn GfxServerFactory>
+                }))
                 .with_sound_factory(Some(Box::new(SoundFactory::new(Arc::clone(&thread_audio)))))
                 .with_cliprdr_factory(Some(Box::new(ClipboardFactory::new(Arc::clone(
                     &thread_clipboard,
