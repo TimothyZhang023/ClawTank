@@ -1,0 +1,94 @@
+name: Publish iOS EGFX compatibility beta 4
+
+on:
+  push:
+    branches: [release/intel-egfx-beta-4]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download and verify successful Intel build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 44922146872 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "412caf6bbeffa8f375d3df706f7087aa14321ed49053fbd8a1ee80eeb6e846cc  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          # ClawTank 0.9.0 Intel / iOS Windows App EGFX compatibility beta 4
+
+          **Experimental Intel x86_64 (macOS 14+) beta from PR #4; do not treat
+          this as iOS device-validated yet.**
+
+          ## Main change
+          An iOS Windows App may advertise EGFX V10 with `AVC_DISABLED`.
+          IronRDP's old capability-mask intersection dropped this negative flag,
+          so the server incorrectly confirmed H.264 support and the client
+          immediately disconnected with a protocol error.
+
+          Beta 4 preserves `AVC_DISABLED` in CapabilitiesConfirm. Clients
+          that support AVC420 still receive VideoToolbox H.264; clients that
+          disable AVC now receive a **live BGRA desktop over EGFX Uncompressed**
+          instead. This no-AVC fallback is capped at 5 fps and consumes
+          significantly more network bandwidth than H.264.
+
+          ## Testing
+          - Intel x86_64 native build, unit tests and packaging: PASS
+          - Apple silicon arm64 native build, unit tests and packaging: PASS
+          - FreeRDP interoperability: PASS
+          - Rust security audit: PASS
+          - Simulated iOS AVC_DISABLED EGFX capability confirmation and raw
+            RGBA pixel delivery: PASS on native runners
+
+          The CI build was run on commit `aeb6c552`. PR #4 squashes that exact
+          tested source tree to `5a56cb91`; its contents are byte-for-byte
+          identical to the CI source.
+
+          ## How to test
+          1. Quit your previous ClawTank beta.
+          2. Download `ClawTank-0.9.0-x86_64.dmg` and replace the app under
+             /Applications. This build is ad-hoc signed and not notarized.
+          3. Launch ClawTank **normally** (do not set CLAWTANK_DISABLE_EGFX).
+          4. Connect with iOS Windows App. Report whether the prior
+             "由于协议错误" has disappeared and the live desktop renders.
+          5. The log should show `EGFX capabilities negotiated` with
+             `codec=Uncompressed` if the client advertised AVC_DISABLED.
+             If the error remains, attach ClawTank logs.
+
+          **No GPU switch is required on Intel+AMD dual-GPU Macs for the
+          uncompressed path.** Existing macOS TCC Screen Recording and
+          Accessibility permissions may need re-granting after replacing an
+          ad-hoc signed beta.
+
+          Includes optional MCP Bundle and SHA256SUMS for integrity checking.
+          This is a pre-release and is not merged into main.
+          NOTES
+          gh release create v0.9.0-intel-beta.4 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 5a56cb91adc3f344f79577b49eeac6eb66a397e9 \
+            --title "ClawTank 0.9.0 Intel iOS EGFX Beta 4" \
+            --notes-file release-notes.md \
+            --prerelease
