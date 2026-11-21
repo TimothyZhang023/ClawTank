@@ -328,7 +328,7 @@ impl dvc::DvcProcessor for AInputHandler {
             ClientPdu::Mouse(pdu) => {
                 let handler = Arc::clone(&self.handler);
                 task::spawn_blocking(move || {
-                    handler.blocking_lock().mouse(pdu.into());
+                    crate::handler::dispatch_advanced_mouse(handler.blocking_lock().as_mut(), pdu);
                 });
             }
         }
