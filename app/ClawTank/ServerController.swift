@@ -63,6 +63,9 @@ final class ServerController: ObservableObject {
     private var server: RdpServer?
     private var video: VideoSession?
     private var videoTask: Task<Void, Never>?
+    /// Invalidates an in-flight capture setup as soon as EGFX closes, the client disconnects,
+    /// or a later resize supersedes it. The serialized task queue alone cannot cancel awaits.
+    private var videoRequestID: UInt64 = 0
     private let displays = DisplayService()
     private var statsTimer: Timer?
     private var lastCounters = VideoSession.Counters()
@@ -319,7 +322,7 @@ extension ServerController {
     /// Starts (or, after a resize, restarts) video at `width`×`height`. Start, stop and restart
     /// run strictly in order on `videoTask` so a resize can't race a disconnect.
     private func startVideo(width: Int, height: Int, scalePercent: Int?) {
-        guard server != nil else { return }
+        guard server != nil, session != nil else { return }
         guard CGPreflightScreenCaptureAccess() else {
             // Shows the system prompt the first time; afterwards the user must use Settings.
             CGRequestScreenCaptureAccess()
@@ -327,14 +330,24 @@ extension ServerController {
             log.notice("Screen Recording not granted; client sees the test pattern")
             return
         }
+        // Invalidate any previous start as soon as this request arrives, not after its awaits.
+        videoRequestID &+= 1
+        let requestID = videoRequestID
         let mode = settings.displayMode
         let frameRate = settings.frameRate
         let bitRateFactor = settings.quality.bitRateFactor
         enqueueVideo { [self] in
+            guard videoRequestID == requestID, session != nil else { return }
             await stopCurrentVideo()
-            guard let server else { return }
-            guard let target = await displays.prepare(width: width, height: height,
-                                                      scalePercent: scalePercent, mode: mode) else {
+            guard videoRequestID == requestID, session != nil, let server else { return }
+            let target = await displays.prepare(width: width, height: height,
+                                                scalePercent: scalePercent, mode: mode)
+            // Creating a virtual display can outlive the entire RDP connection.
+            guard videoRequestID == requestID, session != nil else {
+                displays.release()
+                return
+            }
+            guard let target else {
                 lastNotice = "No display available to share"
                 return
             }
@@ -346,12 +359,21 @@ extension ServerController {
             lastCounters = .init()
             do {
                 try await video.start()
+                // VideoToolbox/ScreenCaptureKit setup may take seconds on an Intel Mac;
+                // stop a stale capture before it is treated as a live RDP session.
+                guard videoRequestID == requestID, session != nil else {
+                    await video.stop()
+                    if self.video === video { self.video = nil }
+                    displays.release()
+                    return
+                }
                 displayDescription = "\(target.isVirtual ? "Virtual" : "Physical") display \(width)×\(height)"
                 session?.resolution = "\(width)×\(height)"
                 log.info("Video \(width)x\(height)@\(frameRate) on \(target.displayID) virtual=\(target.isVirtual)")
             } catch {
-                log.error("Video start failed: \(error.localizedDescription, privacy: .public)")
                 if self.video === video { self.video = nil }
+                guard videoRequestID == requestID, session != nil else { return }
+                log.error("Video start failed: \(error.localizedDescription, privacy: .public)")
                 lastNotice = "Video failed: \(error.localizedDescription)"
                 return
             }
@@ -362,8 +384,9 @@ extension ServerController {
         }
     }
 
-    /// Stops video; with `releaseDisplay` also removes the virtual display (session over).
+    /// Stopping a channel invalidates pending starts immediately, even if cleanup is queued.
     private func stopVideo(releaseDisplay: Bool = false) {
+        videoRequestID &+= 1
         enqueueVideo { [self] in
             await stopCurrentVideo()
             if releaseDisplay {
