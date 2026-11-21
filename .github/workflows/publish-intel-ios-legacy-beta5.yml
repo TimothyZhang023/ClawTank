@@ -1,0 +1,87 @@
+name: Publish Intel iOS Legacy Graphics Beta 5
+
+on:
+  push:
+    branches:
+      - release/intel-ios-legacy-beta-5
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download and verify successful Intel CI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download 44925338172 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "1c01fba374754d9af0b54d7f6c5b6f770d2105056d5d35aca98c735d21496943  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish experimental Intel x86_64 pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          # Intel Mac + iOS Windows App live desktop compatibility (Beta 5)
+
+          Experimental macOS 14+ Intel x86_64 build from [PR #4](https://github.com/TimothyZhang023/ClawTank/pull/4), commit `e3fb961a`.
+          The source tree matches successful dual-architecture CI commit `a57103c2` exactly:
+          [CI 44925338172](https://github.com/TimothyZhang023/ClawTank/actions/runs/44925338172).
+
+          ## What changed since Beta 4
+          - iOS Windows App advertises `AVC_DISABLED`. Preserve this during EGFX negotiation.
+          - Decline the EGFX pipeline **without sending CapabilitiesConfirm** for no-AVC clients.
+          - Use the legacy RDP image channel already proven working in Beta 3. First display the
+            color-bar test pattern, then stream the actual Mac desktop using RDP6 compressed
+            bitmap differences instead of sending ~20.5 MiB raw EGFX frames.
+          - Keep only the latest BGRA frame so slow clients do not build a backlog;
+            capture initially capped at 3 fps for stability.
+          - Other clients that support AVC420 continue using H.264 over EGFX.
+
+          ## Validation
+          - Intel x86_64 native compile, unit tests, and DMG/MCPB packaging: PASS.
+          - Apple silicon arm64 native compile, unit tests, and packaging: PASS.
+          - Independent FreeRDP test and Rust security audit: PASS.
+          - Emulated iOS V10+AVC_DISABLED client: confirms no EGFX CapsConfirm,
+            receives legacy test pattern and then a live changed image: PASS.
+          - **Real iOS Windows App device remains unverified**; this is an experimental pre-release.
+
+          ## How to test
+          1. Quit the prior ClawTank and install the Intel DMG to /Applications.
+          2. Run ClawTank normally. Do NOT set `CLAWTANK_DISABLE_EGFX=1`.
+          3. Connect from iOS Windows App as before.
+          4. Expected: a brief color-bar frame, then the live Mac desktop.
+          5. Useful log markers:
+             `EGFX AVC disabled; declining CapsConfirm, streaming legacy bitmap`
+             `Legacy graphics mode; sending test frame`
+             `First legacy desktop frame queued`
+             `Sending first live legacy desktop frame`
+
+          This build is ad-hoc signed and not notarized; macOS permission grants may need
+          re-approval after replacing the application. It is not merged to `main`.
+
+          Optional Intel MCP bundle and SHA256SUMS included.
+          NOTES
+          gh release create v0.9.0-intel-beta.5 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target e3fb961a7a1986a57e6d3f824dffc35c6d5c7e0f \
+            --title "ClawTank 0.9.0 Intel iOS Legacy Graphics Beta 5" \
+            --notes-file release-notes.md \
+            --prerelease
