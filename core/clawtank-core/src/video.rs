@@ -124,6 +124,12 @@ impl VideoHub {
         unpack(self.session_size.load(Ordering::Acquire))
     }
 
+    /// Whether a client has completed EGFX negotiation. The legacy display uses this
+    /// atomic flag to avoid sending an oversized bitmap once H.264 is available.
+    pub fn is_channel_open(&self) -> bool {
+        self.channel_open.load(Ordering::Acquire)
+    }
+
     /// A new connection built its pipeline: forget the previous session's state.
     pub fn attach(&self, handle: GfxServerHandle) {
         let mut inner = self.lock();
