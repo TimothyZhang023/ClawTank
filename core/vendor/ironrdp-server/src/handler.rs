@@ -77,6 +77,74 @@ pub trait RdpServerInputHandler: Send {
     fn mouse(&mut self, event: MouseEvent);
 }
 
+/// Whether a translated event changes a mouse button, as opposed to moving or scrolling.
+fn is_button_event(event: &MouseEvent) -> bool {
+    matches!(
+        event,
+        MouseEvent::LeftPressed
+            | MouseEvent::LeftReleased
+            | MouseEvent::RightPressed
+            | MouseEvent::RightReleased
+            | MouseEvent::MiddlePressed
+            | MouseEvent::MiddleReleased
+            | MouseEvent::Button4Pressed
+            | MouseEvent::Button4Released
+            | MouseEvent::Button5Pressed
+            | MouseEvent::Button5Released
+    )
+}
+
+/// A button PDU already contains absolute coordinates. RDP clients (notably
+/// Windows App direct-touch on iPad) may send a click without a preceding MOVE.
+/// Do not discard the location and click at the server's previous cursor position.
+/// Wheel coordinates are undefined by MS-RDPBCGR and must never warp the cursor.
+pub(crate) fn dispatch_absolute_mouse(
+    handler: &mut dyn RdpServerInputHandler,
+    x: u16,
+    y: u16,
+    event: MouseEvent,
+) {
+    if is_button_event(&event) {
+        handler.mouse(MouseEvent::Move { x, y });
+    }
+    handler.mouse(event);
+}
+
+/// Relative button PDUs may also carry a delta: apply it before the button, not
+/// after it. Never convert trackpad/relative input to absolute coordinates.
+pub(crate) fn dispatch_relative_mouse(
+    handler: &mut dyn RdpServerInputHandler,
+    dx: i32,
+    dy: i32,
+    event: MouseEvent,
+) {
+    if is_button_event(&event) && (dx != 0 || dy != 0) {
+        handler.mouse(MouseEvent::RelMove { x: dx, y: dy });
+    }
+    handler.mouse(event);
+}
+
+/// Advanced-input mouse events can combine a button edge with a relative
+/// displacement (trackpad mode) or an absolute move. Preserve that ordering,
+/// but do not invent a position for button-only events without MOVE or REL.
+pub(crate) fn dispatch_advanced_mouse(handler: &mut dyn RdpServerInputHandler, pdu: ainput::MousePdu) {
+    let (flags, x, y) = (pdu.flags, pdu.x, pdu.y);
+    let event: MouseEvent = pdu.into();
+    if is_button_event(&event) {
+        if flags.contains(ainput::MouseEventFlags::REL) {
+            dispatch_relative_mouse(handler, x, y, event);
+            return;
+        }
+        if flags.contains(ainput::MouseEventFlags::MOVE)
+            && let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y))
+        {
+            dispatch_absolute_mouse(handler, x, y, event);
+            return;
+        }
+    }
+    handler.mouse(event);
+}
+
 impl From<(u8, fast_path::KeyboardFlags)> for KeyboardEvent {
     fn from((key, flags): (u8, fast_path::KeyboardFlags)) -> Self {
         let extended = flags.contains(fast_path::KeyboardFlags::EXTENDED);
