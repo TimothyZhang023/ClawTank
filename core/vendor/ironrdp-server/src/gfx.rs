@@ -7,6 +7,7 @@
 //! so the display handler can call `send_avc420_frame()` proactively while the
 //! DVC infrastructure handles client messages (capability negotiation, frame acks).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironrdp_core::impl_as_any;
@@ -47,11 +48,20 @@ pub trait GfxServerFactory: ServerEventSender + Send {
 /// enabling shared access from both the DVC layer and the display handler.
 pub struct GfxDvcBridge {
     inner: GfxServerHandle,
+    /// The client explicitly declined AVC. Do not send CapabilitiesConfirm: doing so
+    /// activates EGFX and makes legacy BitmapUpdate a protocol violation on iOS.
+    decline_output: Option<Arc<AtomicBool>>,
 }
 
 impl GfxDvcBridge {
     pub fn new(server: GfxServerHandle) -> Self {
-        Self { inner: server }
+        Self { inner: server, decline_output: None }
+    }
+
+    /// Per-connection switch set synchronously from GraphicsPipelineHandler::on_ready
+    /// while processing the client's capability advertise PDU.
+    pub fn with_decline_flag(server: GfxServerHandle, flag: Arc<AtomicBool>) -> Self {
+        Self { inner: server, decline_output: Some(flag) }
     }
 
     pub fn server(&self) -> &GfxServerHandle {
@@ -74,10 +84,17 @@ impl DvcProcessor for GfxDvcBridge {
     }
 
     fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
-        self.inner
+        let messages = self.inner
             .lock()
             .expect("GfxServerHandle mutex poisoned")
-            .process(channel_id, payload)
+            .process(channel_id, payload)?;
+        if self.decline_output.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            // In particular suppress CapabilitiesConfirm. The client will keep its
+            // pre-EGFX graphics path active and can render live legacy BitmapUpdate.
+            Ok(Vec::new())
+        } else {
+            Ok(messages)
+        }
     }
 
     fn close(&mut self, channel_id: u32) {

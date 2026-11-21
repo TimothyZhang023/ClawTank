@@ -26,7 +26,7 @@ ClawTank is a native RDP server for macOS. Connect from any standard Remote Desk
 
 ## Features
 
-- **Fast:** H.264 over RDP, with hardware encoding preferred and a software fallback on Intel Macs. About 60 fps at under 10% CPU was measured on Apple silicon; Intel performance depends on its encoder.
+- **Fast:** H.264 over RDP, with hardware encoding preferred and a software fallback on Intel Macs. About 60 fps at under 10% CPU was measured on Apple silicon; Intel performance depends on its encoder. Clients that explicitly disable AVC420 (including some iOS Windows App versions) use the compressed legacy RDP bitmap path at up to 3 fps instead. This mode needs no GPU video encoder and favors compatibility over frame rate.
 - **Fits your screen:** the desktop resizes live to the client's window. Retina virtual displays give crisp text, and a headless Mac needs no dummy HDMI plug.
 - **Feels local:**
   - keyboard and mouse, including scroll, middle and back/forward buttons

@@ -17,6 +17,8 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         var codedWidth: Int
         var codedHeight: Int
         var frameRate: Int = 60
+        /// H.264 uses NV12; no-AVC EGFX fallback needs BGRA8888 directly.
+        var pixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         /// Off when the client draws the cursor itself from shapes we send (Phase 3).
         var showsCursor = false
         /// Display size in points; content is fitted (aspect preserved, centred) into the session.
@@ -55,7 +57,7 @@ final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         cfg.destinationRect = config.contentRect
         cfg.scalesToFit = true
         cfg.preservesAspectRatio = false
-        cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        cfg.pixelFormat = config.pixelFormat
         cfg.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_709_2
         cfg.colorSpaceName = CGColorSpace.sRGB
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(config.frameRate))
