@@ -124,6 +124,27 @@ pub(crate) fn dispatch_relative_mouse(
     handler.mouse(event);
 }
 
+/// Advanced-input mouse events can combine a button edge with a relative
+/// displacement (trackpad mode) or an absolute move. Preserve that ordering,
+/// but do not invent a position for button-only events without MOVE or REL.
+pub(crate) fn dispatch_advanced_mouse(handler: &mut dyn RdpServerInputHandler, pdu: ainput::MousePdu) {
+    let (flags, x, y) = (pdu.flags, pdu.x, pdu.y);
+    let event: MouseEvent = pdu.into();
+    if is_button_event(&event) {
+        if flags.contains(ainput::MouseEventFlags::REL) {
+            dispatch_relative_mouse(handler, x, y, event);
+            return;
+        }
+        if flags.contains(ainput::MouseEventFlags::MOVE)
+            && let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y))
+        {
+            dispatch_absolute_mouse(handler, x, y, event);
+            return;
+        }
+    }
+    handler.mouse(event);
+}
+
 impl From<(u8, fast_path::KeyboardFlags)> for KeyboardEvent {
     fn from((key, flags): (u8, fast_path::KeyboardFlags)) -> Self {
         let extended = flags.contains(fast_path::KeyboardFlags::EXTENDED);
