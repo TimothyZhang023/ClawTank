@@ -1,0 +1,100 @@
+name: Publish Intel iPad Touch Beta 7
+
+on:
+  push:
+    branches: [release/intel-ipad-touch-beta-7]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download verified Intel CI artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh run view 44960881754 --repo TimothyZhang023/ClawTank --json conclusion --jq '.conclusion')" = "success"
+          mkdir -p dist
+          gh run download 44960881754 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "5c7158be942d99b55e0657eb4b87465188ed62ed5bd8210616acbe385dfe3946  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish experimental Intel iPad touch release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          # ClawTank Intel iPad Touch Beta 7
+
+          Intel x86_64 build for macOS 14+, integrating upstream ClearCodec mobile
+          graphics [PR #11](https://github.com/HMAKT99/ClawTank/pull/11) and
+          the iPad click-position fix in
+          [our PR #6](https://github.com/TimothyZhang023/ClawTank/pull/6).
+          It builds on our Intel + ClearCodec
+          [PR #5](https://github.com/TimothyZhang023/ClawTank/pull/5).
+
+          ## Fix
+          - MS-RDPBCGR absolute mouse button PDUs include xPos/yPos; the
+            vendored IronRDP mapping previously discarded this location and
+            emitted only LeftPressed/Released, causing a direct-touch tap to
+            click at the previous mouse position when the iPad did not send a
+            preceding MOVE.
+          - For ordinary RDP and extended mouse button PDUs (both fast and slow
+            paths), forward the packet's position before its button event.
+          - Relative mouse button PDUs with a nonzero delta apply that relative
+            movement before the button. Do not force relative trackpad input
+            to an absolute cursor location; wheel packets never warp the cursor.
+          - Advanced-input mouse packets carrying MOVE/REL plus buttons are
+            handled with the same safeguards.
+          - Retina iPad resolution 2776×1938 → 1388×969 macOS display points
+            and non-primary monitor origins are regression-tested.
+
+          ## Verification
+          - CI [44960881754](https://github.com/TimothyZhang023/ClawTank/actions/runs/44960881754):
+            Intel x86_64 and arm64 native builds/tests/packages, FreeRDP
+            interoperability and security audit: **all PASS**.
+          - End-to-end RDP input test specifically sends a button with an
+            absolute position and no preceding move, verifying that a Move is
+            delivered before the button; wheel positions stay ignored.
+          - Preserves the existing iOS ClearCodec mobile desktop path.
+          - **Real iPad Windows App touch alignment on the user's Intel Mac
+            remains to be verified**.
+
+          ## Testing on iPad
+          1. Quit old ClawTank, replace the installed app with the attached Intel DMG.
+          2. Start normally; connect from the same iPad Windows App.
+          3. In Direct touch mode, tap near top-left, center and bottom-right,
+             then tap two distant objects without dragging first.
+          4. Compare Mouse pointer mode and, if available, a hardware mouse.
+             Note whether the tap hit is displaced consistently or hits the
+             previous cursor position.
+          5. iPad Windows App adds optional letterboxing/pillarboxing for safe
+             areas; if a constant display-relative offset remains, compare
+             its Settings > Display > Use Full Display option and report the
+             iPad display/resolution setting.
+
+          This is an experimental prerelease (ad-hoc signed, not notarized).
+          Changing the app build may require re-granting macOS Screen Recording
+          and Accessibility permissions. The touch PR remains unmerged.
+          NOTES
+          gh release create v0.9.0-intel-beta.7 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 900e6d2fef170832312b5969576f835c4b560799 \
+            --title "ClawTank 0.9.0 Intel iPad Touch Fix Beta 7" \
+            --notes-file notes.md \
+            --prerelease
