@@ -11,6 +11,7 @@
 
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use ironrdp_displaycontrol::pdu::DisplayControlMonitorLayout;
@@ -36,6 +37,12 @@ const DEFAULT_SIZE: DesktopSize = DesktopSize {
 const MAX_WIDTH: u16 = 8192;
 const MAX_HEIGHT: u16 = 8192;
 const MIN_SIDE: u16 = 200;
+
+/// Some RDP clients reject the legacy SurfaceBits test frame even when it is small,
+/// and will disconnect before the negotiated EGFX H.264 surface can be initialized.
+/// Give EGFX a short window to come online and avoid mixing the two paths.
+/// Clients that do not negotiate EGFX continue to receive the legacy test pattern.
+const EGFX_NEGOTIATION_GRACE: Duration = Duration::from_millis(1000);
 
 /// Serves the static test pattern.
 pub struct TestPatternDisplay {
@@ -113,6 +120,8 @@ impl RdpServerDisplay for TestPatternDisplay {
             size: self.size,
             sent: false,
             pointer: rx,
+            video: Arc::clone(&self.video),
+            initial_frame_deadline: tokio::time::Instant::now() + EGFX_NEGOTIATION_GRACE,
         }))
     }
 }
@@ -121,6 +130,9 @@ struct TestPatternUpdates {
     size: DesktopSize,
     sent: bool,
     pointer: UnboundedReceiver<DisplayUpdate>,
+    video: Arc<VideoHub>,
+    /// Fixed deadline makes the wait cancellation-safe when IronRDP polls this future in select!.
+    initial_frame_deadline: tokio::time::Instant,
 }
 
 impl TestPatternUpdates {
@@ -143,13 +155,21 @@ impl TestPatternUpdates {
 impl RdpServerDisplayUpdates for TestPatternUpdates {
     async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
         if !self.sent {
+            // Always defer the legacy frame, regardless of resolution. The iOS Windows App
+            // may reject SurfaceBits before H.264 is ready even for a small desktop.
+            // Keep a fixed deadline: next_update may be cancelled and re-polled by select!.
+            tokio::time::sleep_until(self.initial_frame_deadline).await;
             self.sent = true;
-            info!(
-                width = self.size.width,
-                height = self.size.height,
-                "Sending test frame"
-            );
-            return Ok(Some(self.frame()));
+            if self.video.is_channel_open() {
+                info!("EGFX ready; skipping legacy test frame");
+            } else {
+                info!(
+                    width = self.size.width,
+                    height = self.size.height,
+                    "No EGFX after grace period; sending legacy test frame"
+                );
+                return Ok(Some(self.frame()));
+            }
         }
         // After the frame, only cursor shapes flow here (video goes over EGFX). Never return
         // `None` (that ends the session): if the pointer source goes away, just idle.
@@ -163,6 +183,60 @@ impl RdpServerDisplayUpdates for TestPatternUpdates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn skips_legacy_frame_for_small_egfx_clients() {
+        let video = Arc::new(VideoHub::new(Arc::new(|_| {})));
+        let (pointer_tx, pointer_rx) = unbounded_channel();
+        let mut updates = TestPatternUpdates {
+            size: DesktopSize {
+                width: 640,
+                height: 480,
+            },
+            sent: false,
+            pointer: pointer_rx,
+            video: Arc::clone(&video),
+            initial_frame_deadline: tokio::time::Instant::now() + Duration::from_millis(40),
+        };
+        // The EGFX channel becomes ready while the initial legacy frame is deferred.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            video.on_ready(crate::video::StreamCodec::Avc420);
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), updates.next_update())
+                .await
+                .is_err(),
+            "EGFX must not receive an early legacy bitmap at any resolution"
+        );
+        assert!(updates.sent);
+        drop(pointer_tx);
+    }
+
+    #[tokio::test]
+    async fn small_legacy_client_still_receives_test_pattern() {
+        let video = Arc::new(VideoHub::new(Arc::new(|_| {})));
+        let (_pointer_tx, pointer_rx) = unbounded_channel();
+        let mut updates = TestPatternUpdates {
+            size: DesktopSize {
+                width: 640,
+                height: 480,
+            },
+            sent: false,
+            pointer: pointer_rx,
+            video,
+            initial_frame_deadline: tokio::time::Instant::now(),
+        };
+        let update = updates.next_update().await.unwrap().unwrap();
+        match update {
+            DisplayUpdate::Bitmap(bitmap) => {
+                assert_eq!(bitmap.width.get(), 640);
+                assert_eq!(bitmap.height.get(), 480);
+                assert_eq!(bitmap.data.len(), 640 * 480 * 4);
+            }
+            _ => panic!("expected an initial bitmap update"),
+        }
+    }
 
     #[test]
     fn sizes_are_clamped() {

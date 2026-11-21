@@ -203,6 +203,30 @@ final class RdpServer: @unchecked Sendable {
         }
     }
 
+    /// The client disabled AVC420; use EGFX uncompressed BGRA instead of VideoToolbox.
+    var usesUncompressedVideo: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return false }
+        return ct_server_video_codec(handle) == 2
+    }
+
+    /// Submits one tightly packed BGRA8888 desktop frame to the EGFX channel.
+    func submitBGRA(_ data: Data, width: Int, height: Int) -> SubmitResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return .notReady }
+        let result = data.withUnsafeBytes { bytes in
+            ct_server_submit_bgra(handle, bytes.bindMemory(to: UInt8.self).baseAddress,
+                                  bytes.count, UInt16(clamping: width), UInt16(clamping: height))
+        }
+        switch result {
+        case CT_SUBMIT_RESULT_SENT: return .sent
+        case CT_SUBMIT_RESULT_NEED_KEYFRAME: return .needKeyframe
+        default: return .notReady
+        }
+    }
+
     /// Interleaved 16-bit PCM in the negotiated format. Thread-safe.
     @discardableResult
     func submitAudio(_ pcm: Data) -> Bool {

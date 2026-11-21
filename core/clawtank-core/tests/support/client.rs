@@ -7,7 +7,7 @@
 //! reads legacy updates until the image matches ClawTank's test pattern or pumps the session.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,8 +17,12 @@ use ironrdp_async::FramedWrite as _;
 use ironrdp_connector::{ClientConnector, ConnectionResult, Credentials};
 use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
 use ironrdp_egfx::decode::{DecodedFrame, DecoderResult, H264Decoder};
+use ironrdp_egfx::pdu::{
+    CapabilitiesV8Flags, CapabilitiesV10Flags, CapabilitiesV81Flags, CapabilitiesV107Flags,
+    CapabilitySet, Codec1Type,
+};
 use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::gcc::KeyboardType;
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
@@ -100,6 +104,11 @@ pub struct EgfxRecorder {
     pub frames: Arc<AtomicU64>,
     /// Size from the last ResetGraphics.
     pub reset_size: Arc<Mutex<Option<(u32, u32)>>>,
+    /// Simulate iOS Windows App: V10 flags explicitly disable AVC420.
+    pub advertise_no_avc: Arc<AtomicBool>,
+    pub negotiated: Arc<Mutex<Option<CapabilitySet>>>,
+    /// First uncompressed RGBA bitmap from EGFX, for pixel-correctness assertions.
+    pub raw_bitmap: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl EgfxRecorder {
@@ -115,6 +124,43 @@ impl EgfxRecorder {
 struct RecordingHandler(EgfxRecorder);
 
 impl GraphicsPipelineHandler for RecordingHandler {
+    fn capabilities(&self) -> Vec<CapabilitySet> {
+        if self.0.advertise_no_avc.load(Ordering::Acquire) {
+            return vec![
+                CapabilitySet::V10 {
+                    flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED,
+                },
+                CapabilitySet::V8 {
+                    flags: CapabilitiesV8Flags::SMALL_CACHE,
+                },
+            ];
+        }
+        vec![
+            CapabilitySet::V10_7 {
+                flags: CapabilitiesV107Flags::SMALL_CACHE,
+            },
+            CapabilitySet::V8_1 {
+                flags: CapabilitiesV81Flags::AVC420_ENABLED | CapabilitiesV81Flags::SMALL_CACHE,
+            },
+            CapabilitySet::V8 {
+                flags: CapabilitiesV8Flags::SMALL_CACHE,
+            },
+        ]
+    }
+
+    fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
+        *self.0.negotiated.lock().unwrap() = Some(caps.clone());
+    }
+
+    fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
+        if update.codec_id == Codec1Type::Uncompressed {
+            let mut output = self.0.raw_bitmap.lock().unwrap();
+            if output.is_none() {
+                *output = Some(update.data.clone());
+            }
+        }
+    }
+
     fn on_reset_graphics(&mut self, width: u32, height: u32) {
         *self.0.reset_size.lock().unwrap() = Some((width, height));
     }

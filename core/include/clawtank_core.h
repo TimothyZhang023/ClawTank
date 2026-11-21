@@ -414,6 +414,27 @@ CtSubmitResult ct_server_submit_h264(const CtServer *server,
                                      uint16_t height);
 
 /**
+ * EGFX codec: 0 = not ready, 1 = AVC420 H.264, 2 = uncompressed BGRA.
+ *
+ * # Safety
+ * `server` must be null or a live pointer from `ct_server_start`.
+ */
+uint32_t ct_server_video_codec(const CtServer *server);
+
+/**
+ * Submits tightly packed BGRA8888 frames for clients with AVC_DISABLED.
+ * Bytes are copied; frame width/height must equal the current EGFX desktop size.
+ *
+ * # Safety
+ * `server` must be live; `data` must point to `len` readable bytes.
+ */
+CtSubmitResult ct_server_submit_bgra(const CtServer *server,
+                                     const uint8_t *data,
+                                     size_t len,
+                                     uint16_t width,
+                                     uint16_t height);
+
+/**
  * Sets the client-side cursor shape: 32 bpp **BGRA, straight alpha, rows bottom-up**,
  * at most 96×96, hotspot inside. Returns false for invalid input. Sessions starting later
  * receive the latest shape.

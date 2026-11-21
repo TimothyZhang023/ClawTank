@@ -5,13 +5,15 @@
 #[path = "support/client.rs"]
 mod client;
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clawtank_core::events::CoreEvent;
 use clawtank_core::server::{self, ServerConfig};
 use clawtank_core::tls::TlsIdentity;
-use clawtank_core::video::SubmitResult;
+use clawtank_core::video::{StreamCodec, SubmitResult};
+use ironrdp_egfx::pdu::{CapabilitiesV10Flags, CapabilitySet};
 
 const USER: &str = "tester";
 const PASSWORD: &str = "video-test-password";
@@ -154,5 +156,156 @@ async fn submitted_h264_reaches_an_egfx_client() {
         SubmitResult::NotReady,
         "session is gone"
     );
+    server.stop();
+}
+
+/// Regression: a Retina-sized client must survive the initial bitmap and EGFX handshake.
+/// Tests the 2776×1938 size from an Intel Mac beta report without requiring real capture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retina_sized_egfx_session_reaches_first_frame() {
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let server = server::start(
+        ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            username: USER.to_owned(),
+            password: PASSWORD.to_owned(),
+            identity: TlsIdentity::generate("retina-test.local").unwrap(),
+            policy: clawtank_core::access::AccessPolicy::lan_only(),
+        },
+        Arc::new(move |event| log.lock().unwrap().push(event)),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    let video = Arc::clone(server.video());
+    let recorder = client::EgfxRecorder::default();
+    let (result, mut session, _) = client::connect(
+        server.local_addr(),
+        USER,
+        PASSWORD,
+        2776,
+        1938,
+        Some(&recorder),
+    )
+    .await
+    .expect("Retina-sized RDP connection");
+
+    let mut submitted = false;
+    let connection_started = std::time::Instant::now();
+    let ok = client::pump_until(result, &mut session, Duration::from_secs(20), {
+        let events = Arc::clone(&events);
+        let recorder = recorder.clone();
+        move || {
+            if !submitted
+                && events.lock().unwrap().iter().any(|event| {
+                    matches!(
+                        event,
+                        CoreEvent::VideoStart {
+                            width: 2776,
+                            height: 1938
+                        }
+                    )
+                })
+            {
+                assert_eq!(
+                    video.submit_h264(FAKE_IDR, true, 2776, 1938),
+                    SubmitResult::Sent
+                );
+                submitted = true;
+            }
+            // Stay connected beyond the initial legacy-frame grace period to detect
+            // premature protocol disconnects rather than stopping at the first H.264 frame.
+            recorder.frame_count() >= 1
+                && connection_started.elapsed() >= Duration::from_millis(1500)
+        }
+    })
+    .await
+    .expect("Retina-sized EGFX session did not terminate unexpectedly");
+    assert!(
+        ok,
+        "No first EGFX frame at 2776×1938: {:?}",
+        events.lock().unwrap()
+    );
+    assert_eq!(*recorder.reset_size.lock().unwrap(), Some((2776, 1938)));
+
+    drop(session);
+    server.stop();
+}
+
+/// iOS Windows App advertises V10 with AVC_DISABLED. The server must NOT clear that
+/// negative capability in CapsConfirm, and should send live raw pixels over EGFX.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ios_no_avc_capabilities_stream_uncompressed_egfx() {
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let server = server::start(
+        ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            username: USER.to_owned(),
+            password: PASSWORD.to_owned(),
+            identity: TlsIdentity::generate("ios-no-avc.local").unwrap(),
+            policy: clawtank_core::access::AccessPolicy::lan_only(),
+        },
+        Arc::new(move |event| log.lock().unwrap().push(event)),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let video = Arc::clone(server.video());
+    let recorder = client::EgfxRecorder::default();
+    recorder.advertise_no_avc.store(true, Ordering::Release);
+    let (result, mut session, _) = client::connect(
+        server.local_addr(),
+        USER,
+        PASSWORD,
+        320,
+        240,
+        Some(&recorder),
+    )
+    .await
+    .expect("iOS-like EGFX connection");
+
+    let bgra = [0_u8, 0, 255, 255].repeat(320 * 240);
+    let mut submitted = false;
+    let ok = client::pump_until(result, &mut session, Duration::from_secs(15), {
+        let recorder = recorder.clone();
+        move || {
+            if video.codec() == StreamCodec::Uncompressed && !submitted {
+                assert_eq!(
+                    video.submit_h264(FAKE_IDR, true, 320, 240),
+                    SubmitResult::NotReady
+                );
+                assert_eq!(
+                    video.submit_uncompressed(&bgra, 320, 240),
+                    SubmitResult::Sent,
+                );
+                submitted = true;
+            }
+            recorder.frame_count() >= 1
+        }
+    })
+    .await
+    .expect("iOS-like EGFX session did not terminate");
+    assert!(ok, "no uncompressed frame arrived");
+    assert_eq!(
+        *recorder.negotiated.lock().unwrap(),
+        Some(CapabilitySet::V10 {
+            flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED,
+        })
+    );
+    assert_eq!(*recorder.reset_size.lock().unwrap(), Some((320, 240)));
+    let pixels = recorder.raw_bitmap.lock().unwrap();
+    let pixels = pixels
+        .as_ref()
+        .expect("Uncompressed EGFX bitmap not delivered");
+    assert_eq!(pixels.len(), 320 * 240 * 4);
+    assert_eq!(
+        &pixels[0..4],
+        &[255, 0, 0, 255],
+        "BGRA must become client RGBA"
+    );
+    assert_eq!(&pixels[pixels.len() - 4..], &[255, 0, 0, 255]);
+
+    drop(session);
     server.stop();
 }

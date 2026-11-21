@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use ironrdp_egfx::pdu::Avc420Region;
@@ -25,6 +25,15 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::events::{CoreEvent, EventSink};
+
+/// Codec selected by EGFX capability negotiation.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCodec {
+    None = 0,
+    Avc420 = 1,
+    Uncompressed = 2,
+}
 
 /// Outcome of [`VideoHub::submit_h264`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +65,7 @@ pub struct VideoHub {
     inner: Mutex<Inner>,
     // Touched from handler callbacks (pipeline mutex held): atomics only.
     channel_open: AtomicBool,
+    codec: AtomicU8,
     session_size: AtomicU32,
     frames_acked: AtomicU64,
     /// Send time per in-flight frame id. Its own lock: taken from the handler (pipeline mutex
@@ -98,6 +108,7 @@ impl VideoHub {
                 frames_dropped: 0,
             }),
             channel_open: AtomicBool::new(false),
+            codec: AtomicU8::new(StreamCodec::None as u8),
             session_size: AtomicU32::new(pack(1920, 1080)),
             frames_acked: AtomicU64::new(0),
             send_times: Mutex::new(HashMap::new()),
@@ -122,6 +133,20 @@ impl VideoHub {
 
     pub fn session_size(&self) -> (u16, u16) {
         unpack(self.session_size.load(Ordering::Acquire))
+    }
+
+    pub fn codec(&self) -> StreamCodec {
+        match self.codec.load(Ordering::Acquire) {
+            1 => StreamCodec::Avc420,
+            2 => StreamCodec::Uncompressed,
+            _ => StreamCodec::None,
+        }
+    }
+
+    /// Whether a client has completed EGFX negotiation. The legacy display uses this
+    /// atomic flag to avoid sending an oversized bitmap once H.264 is available.
+    pub fn is_channel_open(&self) -> bool {
+        self.channel_open.load(Ordering::Acquire)
     }
 
     /// A new connection built its pipeline: forget the previous session's state.
@@ -165,8 +190,9 @@ impl VideoHub {
     }
 
     /// Handler callback: capabilities negotiated, frames may flow.
-    pub(crate) fn on_ready(&self) {
+    pub(crate) fn on_ready(&self, codec: StreamCodec) {
         let (w, h) = self.session_size();
+        self.codec.store(codec as u8, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
             info!(width = w, height = h, "EGFX ready; requesting video");
             (self.sink)(CoreEvent::VideoStart {
@@ -199,6 +225,7 @@ impl VideoHub {
 
     /// Handler callback, or session end: the graphics channel is gone.
     pub(crate) fn on_close(&self) {
+        self.codec.store(StreamCodec::None as u8, Ordering::Release);
         if self.channel_open.swap(false, Ordering::AcqRel) {
             info!("EGFX closed; stopping video");
             (self.sink)(CoreEvent::VideoStop);
@@ -252,7 +279,28 @@ impl VideoHub {
         width: u16,
         height: u16,
     ) -> SubmitResult {
-        if data.is_empty() || !self.channel_open.load(Ordering::Acquire) {
+        self.submit_frame(data, keyframe, width, height, StreamCodec::Avc420)
+    }
+
+    /// BGRA8888 pixels, tightly packed (no row padding), for a no-AVC EGFX client.
+    /// Cap the producer to a few frames/sec: uncompressed 4K frames are expensive.
+    pub fn submit_uncompressed(&self, data: &[u8], width: u16, height: u16) -> SubmitResult {
+        let expected = usize::from(width) * usize::from(height) * 4;
+        if data.len() != expected {
+            return SubmitResult::NotReady;
+        }
+        self.submit_frame(data, true, width, height, StreamCodec::Uncompressed)
+    }
+
+    fn submit_frame(
+        &self,
+        data: &[u8],
+        keyframe: bool,
+        width: u16,
+        height: u16,
+        codec: StreamCodec,
+    ) -> SubmitResult {
+        if data.is_empty() || self.codec() != codec || !self.channel_open.load(Ordering::Acquire) {
             return SubmitResult::NotReady;
         }
         if (width, height) != self.session_size() {
@@ -305,7 +353,15 @@ impl VideoHub {
                 quantization_parameter: 22,
                 quality: 100,
             };
-            let frame_id = gfx.send_avc420_frame(surface, data, &[region], timestamp_ms);
+            let frame_id = match codec {
+                StreamCodec::Avc420 => {
+                    gfx.send_avc420_frame(surface, data, &[region], timestamp_ms)
+                }
+                StreamCodec::Uncompressed => {
+                    gfx.send_uncompressed_frame(surface, data, w, h, timestamp_ms)
+                }
+                StreamCodec::None => None,
+            };
             (frame_id, gfx.channel_id(), gfx.drain_output())
         };
         let sent = frame_id.is_some();

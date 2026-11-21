@@ -20,7 +20,7 @@ use crate::events::CoreEvent;
 use crate::input::InputEvent;
 use crate::server::{self, ServerConfig, ServerHandle};
 use crate::tls::TlsIdentity;
-use crate::video::SubmitResult;
+use crate::video::{StreamCodec, SubmitResult};
 
 /// Result code for FFI calls.
 #[repr(C)]
@@ -598,6 +598,50 @@ pub unsafe extern "C" fn ct_server_submit_h264(
         .handle
         .video()
         .submit_h264(data, keyframe, width, height)
+    {
+        SubmitResult::Sent => CtSubmitResult::Sent,
+        SubmitResult::NotReady => CtSubmitResult::NotReady,
+        SubmitResult::NeedKeyframe => CtSubmitResult::NeedKeyframe,
+    }
+}
+
+/// EGFX stream codec: 0 = not negotiated, 1 = AVC420, 2 = uncompressed BGRA.
+/// Exposed separately so the host can select its ScreenCaptureKit pixel format.
+///
+/// # Safety
+/// `server` must be null or a live server pointer from `ct_server_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ct_server_video_codec(server: *const CtServer) -> u32 {
+    let Some(server) = (unsafe { server.as_ref() }) else {
+        return 0;
+    };
+    match server.handle.video().codec() {
+        StreamCodec::None => 0,
+        StreamCodec::Avc420 => 1,
+        StreamCodec::Uncompressed => 2,
+    }
+}
+
+/// Submits a tightly packed BGRA8888 EGFX uncompressed frame.
+/// No H.264 encoder is involved; only valid when the client advertised AVC_DISABLED.
+/// # Safety
+/// The server pointer must be live; data must point to len readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ct_server_submit_bgra(
+    server: *const CtServer,
+    data: *const u8,
+    len: usize,
+    width: u16,
+    height: u16,
+) -> CtSubmitResult {
+    let (Some(server), Some(data)) = (unsafe { server.as_ref() }, unsafe { bytes(data, len) })
+    else {
+        return CtSubmitResult::NotReady;
+    };
+    match server
+        .handle
+        .video()
+        .submit_uncompressed(data, width, height)
     {
         SubmitResult::Sent => CtSubmitResult::Sent,
         SubmitResult::NotReady => CtSubmitResult::NotReady,
