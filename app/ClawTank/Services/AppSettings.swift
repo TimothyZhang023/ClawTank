@@ -34,6 +34,50 @@ enum QualityPreset: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Server preference, never an override of the client's advertised EGFX codecs.
+/// Future codecs appear in Settings but cannot be selected until the RDP wire path exists.
+enum VideoMode: String, CaseIterable, Identifiable, Sendable {
+    case automatic, clearCodec, avc420, avc444, hevc
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic (recommended)"
+        case .clearCodec: "ClearCodec (lossless)"
+        case .avc420: "H.264 / AVC420"
+        case .avc444: "H.264 / AVC444 (not yet supported)"
+        case .hevc: "H.265 / HEVC (requires compatible RDP client)"
+        }
+    }
+
+    var isAvailable: Bool {
+        switch self {
+        case .automatic, .clearCodec, .avc420: true
+        case .avc444, .hevc: false
+        }
+    }
+
+    var coreValue: UInt32? {
+        switch self {
+        case .automatic: 0
+        case .clearCodec: 1
+        case .avc420: 2
+        case .avc444, .hevc: nil
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .automatic: "Use H.264 when the client supports it; otherwise ClearCodec."
+        case .clearCodec: "Prefer lossless tiles for sharp text; CPU and bandwidth may be higher."
+        case .avc420: "Prefer hardware H.264; automatically use ClearCodec if the client disables AVC."
+        case .avc444: "Requires a dual-stream H.264 encoder. Not implemented yet."
+        case .hevc: "Standard MS-RDPEGFX has no H.265 codec identifier; Windows App cannot negotiate it."
+        }
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     private let defaults: UserDefaults
@@ -41,6 +85,7 @@ final class AppSettings: ObservableObject {
     @Published var displayMode: DisplayMode { didSet { save(displayMode.rawValue, "displayMode") } }
     @Published var maxFrameRate: Int { didSet { save(maxFrameRate, "maxFrameRate") } }
     @Published var quality: QualityPreset { didSet { save(quality.rawValue, "quality") } }
+    @Published var videoMode: VideoMode { didSet { save(videoMode.rawValue, "videoMode") } }
     @Published var swapControlCommand: Bool { didSet { save(swapControlCommand, "swapControlCommand") } }
     @Published var showsStatsOverlay: Bool { didSet { save(showsStatsOverlay, "showsStatsOverlay") } }
     @Published var keepAwake: Bool { didSet { save(keepAwake, "keepAwake") } }
@@ -65,6 +110,8 @@ final class AppSettings: ObservableObject {
         let savedFrameRate = defaults.integer(forKey: "maxFrameRate")
         maxFrameRate = [30, 60].contains(savedFrameRate) ? savedFrameRate : 60
         quality = QualityPreset(rawValue: defaults.string(forKey: "quality") ?? "") ?? .balanced
+        let storedVideoMode = VideoMode(rawValue: defaults.string(forKey: "videoMode") ?? "") ?? .automatic
+        videoMode = storedVideoMode.isAvailable ? storedVideoMode : .automatic
         swapControlCommand = defaults.bool(forKey: "swapControlCommand")
         showsStatsOverlay = defaults.bool(forKey: "showsStatsOverlay")
         keepAwake = defaults.object(forKey: "keepAwake") as? Bool ?? true
@@ -92,6 +139,7 @@ final class AppSettings: ObservableObject {
     var diagnosticsSummary: [String: String] {
         [
             "displayMode": displayMode.rawValue, "maxFrameRate": "\(maxFrameRate)", "quality": quality.rawValue,
+            "videoMode": videoMode.rawValue,
             "swapControlCommand": "\(swapControlCommand)", "showsStatsOverlay": "\(showsStatsOverlay)",
             "keepAwake": "\(keepAwake)", "port": "\(port)", "lanOnly": "\(lanOnly)",
             "allowlist": allowlist.isEmpty ? "(none)" : allowlist,
