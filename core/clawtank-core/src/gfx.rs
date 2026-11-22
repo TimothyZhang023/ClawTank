@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use ironrdp_egfx::pdu::{
     CapabilitiesAdvertisePdu, CapabilitiesV8Flags, CapabilitiesV10Flags, CapabilitiesV81Flags,
     CapabilitiesV103Flags, CapabilitiesV104Flags, CapabilitiesV107Flags, CapabilitySet,
+    CapabilityVersion, RawCapabilitySet,
 };
 use ironrdp_egfx::server::{GraphicsPipelineHandler, GraphicsPipelineServer};
 use ironrdp_server::{
@@ -129,19 +130,70 @@ pub(crate) fn avc444_allowed(caps: &CapabilitySet) -> bool {
     }
 }
 
+/// Human-readable wire-level capset diagnostics, including unknown Azure 11.x
+/// versions. Never try to interpret an unknown bit pattern as AVC support.
+fn capability_summary(raw: &RawCapabilitySet) -> String {
+    let version = u32::from(raw.version);
+    let flags = if raw.version == CapabilityVersion::V10_1 {
+        "n/a".to_owned()
+    } else if let Some(bytes) = raw.data.get(..4) {
+        let value = u32::from_le_bytes(bytes.try_into().expect("exactly four flag bytes"));
+        format!("0x{value:08X}")
+    } else {
+        "missing".to_owned()
+    };
+    let support = match raw.parsed() {
+        Ok(Some(typed)) => format!(
+            "AVC420={},AVC444={}",
+            avc420_allowed(&typed),
+            avc444_allowed(&typed)
+        ),
+        Ok(None) => "unknown-version".to_owned(),
+        Err(_) => "invalid-flags".to_owned(),
+    };
+    format!(
+        "version=0x{version:08X}(flags={flags},{support},bytes={})",
+        raw.data.len()
+    )
+}
+
 impl GraphicsPipelineHandler for GfxHandler {
     fn capabilities_advertise(&mut self, pdu: &CapabilitiesAdvertisePdu) {
-        info!(?pdu, "Client EGFX capabilities advertised");
+        let capabilities = pdu.0.iter().map(capability_summary).collect::<Vec<_>>().join("; ");
+        info!(
+            gfx_session = self.hub.session_id(),
+            client_capset_count = pdu.0.len(),
+            client_capsets = %capabilities,
+            "RDPGFX_CAPS_ADVERTISE"
+        );
     }
 
     fn preferred_capabilities(&self) -> Vec<CapabilitySet> {
-        preferred_capabilities()
+        let offered = preferred_capabilities();
+        let capabilities = offered
+            .iter()
+            .map(|cap| capability_summary(&RawCapabilitySet::from(cap)))
+            .collect::<Vec<_>>()
+            .join("; ");
+        info!(
+            gfx_session = self.hub.session_id(),
+            server_capsets = %capabilities,
+            "RDPGFX_SERVER_CAPABILITIES"
+        );
+        offered
     }
 
     fn on_ready(&mut self, negotiated: &CapabilitySet) {
         let avc420 = avc420_allowed(negotiated);
         let avc444 = avc444_allowed(negotiated);
-        info!(?negotiated, avc420, avc444, "EGFX capabilities negotiated");
+        let confirmed = capability_summary(&RawCapabilitySet::from(negotiated));
+        info!(
+            gfx_session = self.hub.session_id(),
+            confirmed = %confirmed,
+            avc420,
+            avc444,
+            "RDPGFX_CAPS_CONFIRM"
+        );
         self.hub.on_ready(avc420, avc444);
     }
 
@@ -249,6 +301,25 @@ mod tests {
             }
         );
         assert!(avc420_allowed(&negotiated));
+    }
+
+    #[test]
+    fn logs_keep_raw_flags_and_avc_disabled_restriction() {
+        let cap = CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        };
+        let text = capability_summary(&RawCapabilitySet::from(&cap));
+        assert!(text.contains("version=0x000A0400"));
+        assert!(text.contains("flags=0x00000022"));
+        assert!(text.contains("AVC420=false,AVC444=false"));
+    }
+
+    #[test]
+    fn logs_unknown_version_without_guessing_codec_support() {
+        let raw = RawCapabilitySet::new(CapabilityVersion(0x000B0101), vec![0, 0, 0, 0]);
+        let text = capability_summary(&raw);
+        assert!(text.contains("version=0x000B0101"));
+        assert!(text.contains("unknown-version"));
     }
 
     #[test]

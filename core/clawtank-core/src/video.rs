@@ -82,6 +82,27 @@ impl VideoPreference {
     }
 }
 
+/// Decide wire codec from the confirmed capabilities, never from a user
+/// preference alone. The reason is included in the once-per-session INFO log.
+fn selected_codec(
+    preference: VideoPreference,
+    client_avc420: bool,
+    client_avc444: bool,
+) -> (VideoCodec, &'static str) {
+    match preference {
+        VideoPreference::ClearCodec => (VideoCodec::Raw, "requested-clearcodec"),
+        VideoPreference::Auto if client_avc420 => (VideoCodec::H264, "auto-client-avc420"),
+        VideoPreference::Auto => (VideoCodec::Raw, "auto-client-avc-unavailable"),
+        VideoPreference::Avc420 if client_avc420 => (VideoCodec::H264, "requested-avc420"),
+        VideoPreference::Avc420 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
+        VideoPreference::Avc444 if client_avc444 => (VideoCodec::Avc444, "requested-avc444"),
+        VideoPreference::Avc444 if client_avc420 => {
+            (VideoCodec::H264, "fallback-avc444-to-avc420")
+        }
+        VideoPreference::Avc444 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
+    }
+}
+
 /// Small tiles minimize recompression around text and cursors; larger tiles reduce
 /// ClearCodec headers, allocations and DVC fragmentation for broad screen changes.
 /// The codec uses a glyph cache only for regions at most 1024 pixels, so the final
@@ -157,6 +178,8 @@ pub struct VideoHub {
     /// held) and from `submit_h264` *after* the pipeline mutex is released, never nested.
     send_times: Mutex<HashMap<u32, Instant>>,
     ack_latency_us: AtomicU32,
+    /// Increments each time a new EGFX pipeline is attached, for grouped logs.
+    session_id: AtomicU64,
     /// True only when this session is both AVC-capable and policy-selected for H.264.
     avc: AtomicBool,
     /// Current negotiated graphics path uses dual-stream AVC444.
@@ -221,6 +244,7 @@ impl VideoHub {
             frames_acked: AtomicU64::new(0),
             send_times: Mutex::new(HashMap::new()),
             ack_latency_us: AtomicU32::new(0),
+            session_id: AtomicU64::new(0),
             avc: AtomicBool::new(true),
             avc444: AtomicBool::new(false),
             preference: AtomicU8::new(VideoPreference::Auto as u8),
@@ -236,6 +260,11 @@ impl VideoHub {
         self.lock().sender = Some(sender);
     }
 
+    /// Identifier shared by this graphics session's negotiation and frame logs.
+    pub(crate) fn session_id(&self) -> u64 {
+        self.session_id.load(Ordering::Acquire)
+    }
+
     /// Desktop size negotiated for the current session; the EGFX surface uses it.
     pub fn set_session_size(&self, width: u16, height: u16) {
         self.session_size
@@ -249,6 +278,7 @@ impl VideoHub {
     /// A new connection built its pipeline: forget the previous session's state.
     pub fn attach(&self, handle: GfxServerHandle) {
         let mut inner = self.lock();
+        self.session_id.fetch_add(1, Ordering::AcqRel);
         inner.handle = Some(handle);
         inner.surface = None;
         inner.need_keyframe = true;
@@ -315,20 +345,20 @@ impl VideoHub {
     pub(crate) fn on_ready(&self, client_avc420: bool, client_avc444: bool) {
         let (w, h) = self.session_size();
         let preference = self.preference();
-        let use_avc444 = client_avc444 && preference == VideoPreference::Avc444;
-        let use_avc = client_avc420 && preference != VideoPreference::ClearCodec;
-        self.avc.store(use_avc, Ordering::Release);
-        self.avc444.store(use_avc444, Ordering::Release);
+        let (codec, reason) = selected_codec(preference, client_avc420, client_avc444);
+        self.avc.store(codec != VideoCodec::Raw, Ordering::Release);
+        self.avc444.store(codec == VideoCodec::Avc444, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
             info!(
+                gfx_session = self.session_id(),
                 width = w,
                 height = h,
+                requested = ?preference,
+                selected = ?codec,
+                reason,
                 client_avc420,
                 client_avc444,
-                ?preference,
-                use_avc,
-                use_avc444,
-                "EGFX ready; requesting video"
+                "RDPGFX_CODEC_SELECTED"
             );
             (self.sink)(CoreEvent::VideoStart {
                 width: w,
@@ -361,7 +391,7 @@ impl VideoHub {
     /// Handler callback, or session end: the graphics channel is gone.
     pub(crate) fn on_close(&self) {
         if self.channel_open.swap(false, Ordering::AcqRel) {
-            info!("EGFX closed; stopping video");
+            info!(gfx_session = self.session_id(), selected = ?self.codec(), "RDPGFX_CHANNEL_CLOSED");
             (self.sink)(CoreEvent::VideoStop);
         }
     }
@@ -474,6 +504,9 @@ impl VideoHub {
         Self::post(&sender, channel_id, messages);
 
         if sent {
+            if inner.frames_sent == 0 {
+                info!(gfx_session = self.session_id(), codec = "AVC420", "RDPGFX_FIRST_FRAME_SENT");
+            }
             inner.need_keyframe = false;
             inner.frames_sent += 1;
             inner.bytes_sent += data.len() as u64;
@@ -541,6 +574,9 @@ impl VideoHub {
         }
         Self::post(&sender, channel_id, messages);
         if frame_id.is_some() {
+            if inner.frames_sent == 0 {
+                info!(gfx_session = self.session_id(), codec = "AVC444", "RDPGFX_FIRST_FRAME_SENT");
+            }
             inner.need_keyframe = false;
             inner.frames_sent += 1;
             inner.bytes_sent += (luma.len() + chroma.len()) as u64;
@@ -737,6 +773,9 @@ impl VideoHub {
         Self::post(&sender, channel_id, messages);
 
         if frame_id.is_some() {
+            if inner.frames_sent == 0 {
+                info!(gfx_session = self.session_id(), codec = "ClearCodec", "RDPGFX_FIRST_FRAME_SENT");
+            }
             inner.clear_seq = seq;
             if full {
                 inner.shown.resize(row * h, 0);
@@ -804,6 +843,30 @@ mod video_preference_tests {
         // Azure HEVC is not part of this pinned EGFX protocol version.
         assert_eq!(VideoPreference::from_u32(4), None);
         assert_eq!(VideoPreference::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn codec_selection_logs_explicit_fallback_reasons() {
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, true, false),
+            (VideoCodec::H264, "fallback-avc444-to-avc420")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, false, false),
+            (VideoCodec::Raw, "fallback-client-avc-unavailable")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, true, true),
+            (VideoCodec::Avc444, "requested-avc444")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Auto, false, false),
+            (VideoCodec::Raw, "auto-client-avc-unavailable")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::ClearCodec, true, true),
+            (VideoCodec::Raw, "requested-clearcodec")
+        );
     }
 
     #[test]
