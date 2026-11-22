@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use ironrdp_egfx::pdu::Avc420Region;
@@ -54,6 +54,30 @@ pub enum VideoCodec {
     /// Raw BGRA frames via [`VideoHub::submit_bgra`] (EGFX ClearCodec tiles); the client
     /// negotiated EGFX with AVC disabled.
     Raw,
+}
+
+/// Server-side video preference. A preference never overrides a client's
+/// advertised codec capabilities. AVC444 and HEVC are intentionally absent:
+/// AVC444 requires a real dual H.264 stream encoder, and standard EGFX has
+/// no HEVC wire codec identifier.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoPreference {
+    Auto = 0,
+    ClearCodec = 1,
+    Avc420 = 2,
+}
+
+impl VideoPreference {
+    /// Converts a C ABI value into a supported policy.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Auto),
+            1 => Some(Self::ClearCodec),
+            2 => Some(Self::Avc420),
+            _ => None,
+        }
+    }
 }
 
 /// Tile edge for the raw path. Remainders narrower than [`MIN_TILE`] are merged into the
@@ -105,8 +129,10 @@ pub struct VideoHub {
     /// held) and from `submit_h264` *after* the pipeline mutex is released, never nested.
     send_times: Mutex<HashMap<u32, Instant>>,
     ack_latency_us: AtomicU32,
-    /// Whether the negotiated EGFX capabilities allow AVC420 (set before `VideoStart`).
+    /// True only when this session is both AVC-capable and policy-selected for H.264.
     avc: AtomicBool,
+    /// Persistent preference for future sessions; updates never switch an active codec.
+    preference: AtomicU8,
 }
 
 struct Inner {
@@ -157,6 +183,7 @@ impl VideoHub {
             send_times: Mutex::new(HashMap::new()),
             ack_latency_us: AtomicU32::new(0),
             avc: AtomicBool::new(true),
+            preference: AtomicU8::new(VideoPreference::Auto as u8),
         }
     }
 
@@ -224,13 +251,29 @@ impl VideoHub {
         }
     }
 
-    /// Handler callback: capabilities negotiated, frames may flow. `avc` says whether the
-    /// client accepts AVC420; the host reads it back through [`Self::codec`] on `VideoStart`.
-    pub(crate) fn on_ready(&self, avc: bool) {
+    /// Select a policy for the next client connection (or reconnect).
+    /// ClearCodec is mandatory for EGFX, and AVC420 is used only if advertised.
+    pub fn set_preference(&self, preference: VideoPreference) {
+        self.preference.store(preference as u8, Ordering::Release);
+    }
+
+    pub fn preference(&self) -> VideoPreference {
+        match self.preference.load(Ordering::Acquire) {
+            1 => VideoPreference::ClearCodec,
+            2 => VideoPreference::Avc420,
+            _ => VideoPreference::Auto,
+        }
+    }
+
+    /// Handler callback: choose a codec from the actual client capabilities
+    /// and user preference. Never send H.264 when AVC_DISABLED was advertised.
+    pub(crate) fn on_ready(&self, client_avc: bool) {
         let (w, h) = self.session_size();
-        self.avc.store(avc, Ordering::Release);
+        let preference = self.preference();
+        let use_avc = client_avc && preference != VideoPreference::ClearCodec;
+        self.avc.store(use_avc, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
-            info!(width = w, height = h, avc, "EGFX ready; requesting video");
+            info!(width = w, height = h, client_avc, ?preference, use_avc, "EGFX ready; requesting video");
             (self.sink)(CoreEvent::VideoStart {
                 width: w,
                 height: h,
@@ -567,5 +610,44 @@ impl VideoHub {
             inner.frames_dropped += 1;
             SubmitResult::NotReady
         }
+    }
+}
+
+#[cfg(test)]
+mod video_preference_tests {
+    use super::*;
+
+    #[test]
+    fn only_implemented_graphics_modes_are_accepted() {
+        assert_eq!(VideoPreference::from_u32(0), Some(VideoPreference::Auto));
+        assert_eq!(VideoPreference::from_u32(1), Some(VideoPreference::ClearCodec));
+        assert_eq!(VideoPreference::from_u32(2), Some(VideoPreference::Avc420));
+        // AVC444 dual-stream encoding and H.265 wire support are not implemented.
+        assert_eq!(VideoPreference::from_u32(3), None);
+        assert_eq!(VideoPreference::from_u32(4), None);
+        assert_eq!(VideoPreference::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn policy_does_not_override_mobile_avc_disabled() {
+        let hub = VideoHub::new(Arc::new(|_| {}));
+        hub.set_preference(VideoPreference::Avc420);
+        hub.on_ready(false);
+        assert_eq!(hub.codec(), VideoCodec::Raw);
+        hub.on_close();
+
+        hub.on_ready(true);
+        assert_eq!(hub.codec(), VideoCodec::H264);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::ClearCodec);
+        hub.on_ready(true);
+        assert_eq!(hub.codec(), VideoCodec::Raw);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::Auto);
+        hub.on_ready(true);
+        assert_eq!(hub.codec(), VideoCodec::H264);
+        hub.on_close();
     }
 }
