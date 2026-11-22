@@ -51,6 +51,32 @@ final class CoordinateMapperTests: XCTestCase {
         XCTAssertEqual(bottomRight, CGPoint(x: 1279, y: 799))
     }
 
+    func testIPadRetinaVirtualDisplayMapsPixelTapIntoGlobalPoints() {
+        // iPad requests 2776×1938 framebuffer pixels; the virtual Mac display
+        // is 1388×969 global points on a second monitor. The client click is in
+        // framebuffer pixels, but Quartz HID events need global display points.
+        let bounds = CGRect(x: 1440, y: -100, width: 1388, height: 969)
+        let mapper = CoordinateMapper(sessionWidth: 2776, sessionHeight: 1938,
+                                      displayBounds: bounds)
+        XCTAssertEqual(mapper.scale, 2, accuracy: 0.0001)
+        XCTAssertEqual(mapper.displayPoint(sessionX: 0, sessionY: 0), CGPoint(x: 1440, y: -100))
+        XCTAssertEqual(mapper.displayPoint(sessionX: 2000, sessionY: 1000), CGPoint(x: 2440, y: 400))
+        XCTAssertEqual(mapper.displayPoint(sessionX: 2775, sessionY: 1937),
+                       CGPoint(x: 2827, y: 868))
+
+        let poster = RecordingPoster()
+        let input = InputInjector(mapper: mapper, swapControlCommand: false, poster: poster)
+        input.handle(.move(x: 2000, y: 1000))
+        input.handle(.button(0, down: true))
+        XCTAssertEqual(poster.events.last?.location, CGPoint(x: 2440, y: 400))
+
+        let capture = ScreenCapture.Configuration(contentWidth: 2776, contentHeight: 1938,
+                                                  codedWidth: 2776, codedHeight: 1938,
+                                                  displaySize: bounds.size)
+        XCTAssertEqual(capture.contentRect, CGRect(x: 0, y: 0, width: 2776, height: 1938),
+                       "Input and the iPad video content must use the same scale")
+    }
+
     func testMatchesCaptureContentRect() {
         let config = ScreenCapture.Configuration(contentWidth: 1920, contentHeight: 1080, codedWidth: 1920,
                                                  codedHeight: 1088, displaySize: CGSize(width: 1280, height: 800))
