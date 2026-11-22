@@ -1,0 +1,97 @@
+name: Publish Intel Codec Selection Beta 8
+
+on:
+  push:
+    branches: [release/intel-codec-choice-beta-8]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download and validate native x86_64 CI build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh run view 44977359086 --repo TimothyZhang023/ClawTank --json conclusion --jq '.conclusion')" = "success"
+          mkdir -p dist
+          gh run download 44977359086 \
+            --repo TimothyZhang023/ClawTank \
+            --name ClawTank-x86_64 \
+            --dir dist
+          (
+            cd dist
+            echo "4e08344981fe1ef4aa896534dcf09cb23871b1de0a58c0dd1b654856bc09258d  ClawTank-0.9.0-x86_64.dmg" | sha256sum -c -
+            echo "e26e499d93e3a45480ffdb4715208e5352f989098e26424534e275e25e805672  clawtank-mcp-0.9.0-x86_64.mcpb" | sha256sum -c -
+            sha256sum ClawTank-0.9.0-x86_64.dmg clawtank-mcp-0.9.0-x86_64.mcpb > SHA256SUMS
+          )
+
+      - name: Publish experimental codec selection beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          # ClawTank Intel Graphics Codec Selection Beta 8
+
+          Intel x86_64 for macOS 14+, built from
+          [PR #8](https://github.com/TimothyZhang023/ClawTank/pull/8)
+          at commit `9f41eb739556`.
+
+          ## Graphics codec controls
+
+          Open **Settings → Display & Quality → Graphics codec**.
+
+          - **Automatic (default):** H.264/AVC420 if negotiated, otherwise ClearCodec.
+          - **ClearCodec (lossless):** prefer the EGFX ClearCodec tile path on any EGFX client.
+          - **H.264/AVC420:** prefer VideoToolbox H.264 where the client allows it.
+            If the client advertised AVC_DISABLED, safely fall back to ClearCodec.
+          - **AVC444:** listed but disabled pending a real dual-stream H.264 encoder.
+          - **H.265/HEVC:** listed but disabled; standard MS-RDPEGFX does not negotiate HEVC.
+
+          Settings are persisted and affect the NEXT client connection. The
+          server now logs the client's advertised caps, final EGFX capability
+          set, requested preference and actual codec selection.
+
+          ## iPad Windows App example
+
+          The tested iPad app advertised EGFX V10.4 with SMALL_CACHE and
+          AVC_DISABLED, so H.264 is not valid for that session. Its hardware
+          decoder capabilities do not override this RDP protocol declaration.
+          Selecting AVC420 in ClawTank therefore DOES NOT force AVC420 on
+          the iPad; the connection remains on ClearCodec.
+
+          ## Validation and compatibility
+
+          - CI [44977359086](https://github.com/TimothyZhang023/ClawTank/actions/runs/44977359086):
+            native x86_64 and arm64 builds/tests/packages, FreeRDP, audit all PASS.
+          - Existing Intel VideoToolbox fallback, mobile ClearCodec and iPad
+            click-coordinate fixes are retained.
+          - This beta does **not** incorporate separate performance PR #7.
+            Selecting a codec cannot by itself increase fps for AVC_DISABLED clients.
+
+          ## How to install
+
+          1. Quit ClawTank Beta 7 and install the Intel DMG into /Applications.
+          2. Launch normally, open Settings → Display & Quality and select a
+             graphics codec. Leave Automatic for typical use.
+          3. Disconnect/reconnect iPad Windows App so the new preference applies.
+          4. Check logs for EGFX negotiation and selected codec.
+          5. Unsigned ad-hoc builds may need macOS Screen Recording and
+             Accessibility permissions again after replacement.
+
+          This is a prerelease. The source branch remains independent of main.
+          NOTES
+          gh release create v0.9.0-intel-beta.8 \
+            dist/ClawTank-0.9.0-x86_64.dmg \
+            dist/clawtank-mcp-0.9.0-x86_64.mcpb \
+            dist/SHA256SUMS \
+            --repo TimothyZhang023/ClawTank \
+            --target 9f41eb7395564551809ee8c3c1266f71506eae5c \
+            --title "ClawTank Intel Graphics Codec Selection Beta 8" \
+            --notes-file notes.md \
+            --prerelease
