@@ -5,6 +5,7 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 ## [Unreleased]
 
 ### Fixed
+- Improve iOS/Android no-AVC ClearCodec throughput: adaptive 64/128-pixel tile sizes for sparse vs broad changes, copy only changed regions of the diff reference, reject backpressured frames before encoding, and retry pending frames every 20 ms. Log real raw-frame encode cost, average tile count, payload size and client ACK latency to distinguish CPU and network bottlenecks.
 - iPad Windows App direct-touch clicks can land at the previous mouse position: preserve the (x,y) present in RDP button PDUs by forwarding a position update before press/release; preserve relative movement and ignore undefined wheel coordinates.
 - Windows App / Microsoft Remote Desktop on **Android and iOS/iPadOS** disconnected with "protocol error" right after login ([HMAKT99/ClawTank#10](https://github.com/HMAKT99/ClawTank/issues/10)). These clients advertise the graphics pipeline with `AVC_DISABLED` (no H.264 decoder); IronRDP's negotiation dropped the flag, so ClawTank confirmed AVC and sent H.264. The flag is now kept, and such clients get a lossless raw-frame path instead: BGRA capture, changed 64×64 tiles only, sent as ClearCodec (ADR-025). Desktop clients still get H.264, unchanged.
 
