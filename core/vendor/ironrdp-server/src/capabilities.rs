@@ -53,8 +53,14 @@ fn order_capabilities() -> capability_sets::Order {
 }
 
 fn surface_capabilities() -> capability_sets::SurfaceCommands {
+    // MS-RDPBCGR 2.2.7.2.9 defines only these three wire flags (0x52).
+    // CmdFlags::all() also sets reserved bits because the bitflags type
+    // includes an unnamed !0 retention mask. Advertising 0xFFFFFFFF
+    // breaks strict capability parsing and may influence client heuristics.
     capability_sets::SurfaceCommands {
-        flags: capability_sets::CmdFlags::all(),
+        flags: capability_sets::CmdFlags::SET_SURFACE_BITS
+            | capability_sets::CmdFlags::FRAME_MARKER
+            | capability_sets::CmdFlags::STREAM_SURFACE_BITS,
     }
 }
 
