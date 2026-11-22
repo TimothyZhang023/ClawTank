@@ -148,11 +148,47 @@ fn capability_summary(raw: &RawCapabilitySet) -> String {
             avc420_allowed(&typed),
             avc444_allowed(&typed)
         ),
+        Ok(None) if (0x000B_0000..0x000C_0000).contains(&version) => {
+            if let Some(bytes) = raw.data.get(..4) {
+                let bits = u32::from_le_bytes(bytes.try_into().expect("four flag bytes"));
+                format!(
+                    "unknown-version,AVC_DISABLED={},HEVC_ENABLE={},AVCMM_ENABLE={},SCP_DISABLE={},SCALEDMAP_DISABLE={}",
+                    bits & 0x20 != 0,
+                    bits & 0x400 != 0,
+                    bits & 0x800 != 0,
+                    bits & 0x100 != 0,
+                    bits & 0x80 != 0
+                )
+            } else {
+                "unknown-version,invalid-flags".to_owned()
+            }
+        }
         Ok(None) => "unknown-version".to_owned(),
         Err(_) => "invalid-flags".to_owned(),
     };
     format!(
         "version=0x{version:08X}(flags={flags},{support},bytes={})",
+        raw.data.len()
+    )
+}
+
+/// Server-offered flags are an intersection mask in IronRDP 0.3, not
+/// the client's decoder capabilities. In particular, setting AVC_DISABLED
+/// in this mask *preserves* that bit when the client sends it; it does not
+/// disable AVC for desktop clients that did not set it.
+fn server_capability_mask(cap: &CapabilitySet) -> String {
+    let raw = RawCapabilitySet::from(cap);
+    let version = u32::from(raw.version);
+    let flags = if raw.version == CapabilityVersion::V10_1 {
+        "n/a".to_owned()
+    } else if let Some(bytes) = raw.data.get(..4) {
+        let value = u32::from_le_bytes(bytes.try_into().expect("four flag bytes"));
+        format!("0x{value:08X}")
+    } else {
+        "missing".to_owned()
+    };
+    format!(
+        "version=0x{version:08X}(flag_mask={flags},bytes={})",
         raw.data.len()
     )
 }
@@ -177,7 +213,7 @@ impl GraphicsPipelineHandler for GfxHandler {
         let offered = preferred_capabilities();
         let capabilities = offered
             .iter()
-            .map(|cap| capability_summary(&RawCapabilitySet::from(cap)))
+            .map(server_capability_mask)
             .collect::<Vec<_>>()
             .join("; ");
         info!(
@@ -317,6 +353,32 @@ mod tests {
         assert!(text.contains("version=0x000A0400"));
         assert!(text.contains("flags=0x00000022"));
         assert!(text.contains("AVC420=false,AVC444=false"));
+    }
+
+    #[test]
+    fn azure_v11_3_does_not_enable_hevc_on_ipad() {
+        // Captured from iPad Windows App: V11.1/V11.3 both use 0x000001A2.
+        let azure = RawCapabilitySet::new(
+            CapabilityVersion(0x000B_0300),
+            0x0000_01A2u32.to_le_bytes().to_vec(),
+        );
+        let summary = capability_summary(&azure);
+        assert!(summary.contains("AVC_DISABLED=true"));
+        assert!(summary.contains("HEVC_ENABLE=false"));
+        assert!(summary.contains("AVCMM_ENABLE=false"));
+        assert!(summary.contains("SCP_DISABLE=true"));
+        assert!(summary.contains("SCALEDMAP_DISABLE=true"));
+    }
+
+    #[test]
+    fn server_offer_flags_are_not_reported_as_decoder_capabilities() {
+        let offered = CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        };
+        let summary = server_capability_mask(&offered);
+        assert!(summary.contains("version=0x000A0400"));
+        assert!(summary.contains("flag_mask=0x00000022"));
+        assert!(!summary.contains("AVC420=false"));
     }
 
     #[test]
