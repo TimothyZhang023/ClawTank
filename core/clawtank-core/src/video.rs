@@ -615,6 +615,8 @@ impl VideoHub {
 
 #[cfg(test)]
 mod video_preference_tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
