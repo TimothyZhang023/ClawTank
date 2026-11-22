@@ -35,6 +35,9 @@ final class VideoSession: @unchecked Sendable {
     private var needKeyframe = true
     private var overlayText = ""
     private var encoder: H264Encoder?
+    private var avc444Encoder: AVC444Encoder?
+    private let avc444Queue = DispatchQueue(label: "dev.clawtank.avc444", qos: .userInitiated)
+    private var avc444Encoding = false
     private var capture: ScreenCapture?
     private let overlay = StatsOverlay()
     private var adaptive: AdaptiveBitrate?
@@ -46,6 +49,7 @@ final class VideoSession: @unchecked Sendable {
     let bitRateFactor: Double
     /// Raw BGRA instead of H.264 (decided by the core from the client's capabilities).
     let isRaw: Bool
+    let isAvc444: Bool
 
     // Raw path state: newest unsent frame (guarded by `lock`), its serial submit queue, the
     // retry timer and the core's byte counter at start (for the stats readout).
@@ -61,8 +65,10 @@ final class VideoSession: @unchecked Sendable {
          bitRateFactor: Double = 1, overlayEnabled: @escaping @Sendable () -> Bool) {
         self.server = server
         self.target = target
-        let raw = server.videoCodec == .raw
+        let selected = server.videoCodec
+        let raw = selected == .raw
         self.isRaw = raw
+        self.isAvc444 = selected == .avc444
         self.frameRate = raw ? min(frameRate, Self.rawMaxFrameRate) : frameRate
         self.bitRateFactor = bitRateFactor
         self.contentWidth = width
@@ -73,7 +79,7 @@ final class VideoSession: @unchecked Sendable {
     var codedWidth: Int { isRaw ? contentWidth : H264Encoder.Settings.aligned(contentWidth) }
     var codedHeight: Int { isRaw ? contentHeight : H264Encoder.Settings.aligned(contentHeight) }
 
-    var isHardwareAccelerated: Bool { encoder?.isHardwareAccelerated ?? false }
+    var isHardwareAccelerated: Bool { avc444Encoder?.isHardwareAccelerated ?? encoder?.isHardwareAccelerated ?? false }
 
     func snapshot() -> Counters {
         lock.withLock { counters }
@@ -91,13 +97,20 @@ final class VideoSession: @unchecked Sendable {
             let changed = adaptive?.update(sample)
             return (changed, adaptive)
         }
-        if let changed { encoder?.setBitRate(changed) }
+        if let changed {
+            encoder?.setBitRate(changed)
+            avc444Queue.async { [weak self] in self?.avc444Encoder?.setBitRate(changed) }
+        }
         return state.map { ($0.current, $0.congested) }
     }
 
     func start() async throws {
         if isRaw {
             try await startRaw()
+            return
+        }
+        if isAvc444 {
+            try await startAvc444()
             return
         }
         let baseRate = H264Encoder.Settings.defaultBitRate(width: codedWidth, height: codedHeight, frameRate: frameRate)
@@ -137,6 +150,10 @@ final class VideoSession: @unchecked Sendable {
         capture = nil
         encoder?.flush()
         encoder = nil
+        avc444Queue.sync {
+            avc444Encoder?.flush()
+            avc444Encoder = nil
+        }
         rawTimer?.cancel()
         rawTimer = nil
         lock.withLock { pendingRaw = nil }
@@ -254,6 +271,96 @@ final class VideoSession: @unchecked Sendable {
                 needKeyframe = true
             case .notReady:
                 break
+            }
+        }
+    }
+}
+
+
+// AVC444's dual H.264 streams are serialized on a separate queue so a slow
+// software encoder cannot block ScreenCaptureKit callbacks or swap timestamps.
+extension VideoSession {
+    fileprivate func startAvc444() async throws {
+        let rate = H264Encoder.Settings.defaultBitRate(
+            width: codedWidth, height: codedHeight, frameRate: frameRate)
+        #if arch(x86_64)
+        let softwareFallback = true
+        #else
+        let softwareFallback = false
+        #endif
+        let settings = H264Encoder.Settings(
+            width: codedWidth, height: codedHeight, frameRate: frameRate,
+            averageBitRate: max(2_000_000, Int(Double(rate) * bitRateFactor) * 2),
+            lowLatencyRateControl: true, allowSoftwareFallback: softwareFallback)
+        lock.withLock { adaptive = AdaptiveBitrate(target: settings.averageBitRate) }
+        let dual = try AVC444Encoder(settings: settings)
+        avc444Encoder = dual
+        log.info("AVC444 dual-stream encoder started \(self.codedWidth)x\(self.codedHeight)")
+        if !dual.isHardwareAccelerated {
+            log.notice("AVC444 using software H.264 fallback")
+        }
+        let capture = ScreenCapture(
+            onFrame: { [weak self] buffer, time in self?.handleAvc444(buffer, time) },
+            onStop: { [weak self] _ in self?.log.notice("AVC444 capture ended") })
+        try await capture.start(.init(
+            contentWidth: contentWidth, contentHeight: contentHeight,
+            codedWidth: codedWidth, codedHeight: codedHeight, frameRate: frameRate,
+            displaySize: target.bounds.size, pixelFormat: kCVPixelFormatType_32BGRA),
+            displayID: target.displayID)
+        self.capture = capture
+    }
+
+    fileprivate func handleAvc444(_ buffer: CVPixelBuffer, _ time: CMTime) {
+        let admitted = lock.withLock { () -> Bool in
+            counters.capturedFrames += 1
+            guard !avc444Encoding else {
+                counters.skippedFrames += 1
+                return false
+            }
+            avc444Encoding = true
+            return true
+        }
+        guard admitted else { return }
+        avc444Queue.async { [weak self] in self?.encodeAvc444(buffer, time) }
+    }
+
+    private func encodeAvc444(_ buffer: CVPixelBuffer, _ time: CMTime) {
+        defer { lock.withLock { avc444Encoding = false } }
+        guard let avc444Encoder, server.canAcceptVideo else {
+            lock.withLock { counters.skippedFrames += 1 }
+            return
+        }
+        let (forceKeyframe, text) = lock.withLock { () -> (Bool, String) in
+            let force = needKeyframe
+            needKeyframe = false
+            return (force, overlayText)
+        }
+        var pixelBuffer = buffer
+        if overlayEnabled(), let overlaid = overlay.render(text, onto: buffer) {
+            pixelBuffer = overlaid
+        }
+        guard let output = avc444Encoder.encode(
+            pixelBuffer, presentationTime: time, forceKeyframe: forceKeyframe) else {
+            lock.withLock {
+                needKeyframe = true
+                counters.skippedFrames += 1
+            }
+            return
+        }
+        let result = server.submitAVC444(
+            luma: output.luma, chroma: output.chroma, keyframe: output.isKeyframe,
+            width: contentWidth, height: contentHeight)
+        lock.withLock {
+            counters.encodedFrames += 1
+            counters.encodeSeconds += output.encodeDuration
+            switch result {
+            case .sent:
+                counters.sentBytes += output.luma.count + output.chroma.count
+                if output.isKeyframe { counters.keyframes += 1 }
+            case .notReady, .needKeyframe:
+                // Both reference chains must restart together after a drop.
+                needKeyframe = true
+                counters.skippedFrames += 1
             }
         }
     }
