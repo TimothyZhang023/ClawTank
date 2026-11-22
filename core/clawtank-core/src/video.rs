@@ -56,28 +56,54 @@ pub enum VideoCodec {
     Raw,
 }
 
-/// Tile edge for the raw path. Remainders narrower than [`MIN_TILE`] are merged into the
-/// previous tile so every tile has more than 1024 pixels: IronRDP's ClearCodec encoder only
-/// uses its glyph cache for tiles of at most 1024 pixels, and we keep it out of play (see
-/// `submit_bgra` on sequence numbers).
-const TILE: usize = 64;
+/// Small tiles minimize recompression around text and cursors; larger tiles reduce
+/// ClearCodec headers, allocations and DVC fragmentation for broad screen changes.
+/// The codec uses a glyph cache only for regions at most 1024 pixels, so the final
+/// short strip must be merged with its previous tile.
+const TILE_SMALL: usize = 64;
+const TILE_DENSE: usize = 128;
 const MIN_TILE: usize = 33;
 
-/// Splits `0..len` into `(start, size)` spans of about [`TILE`].
-fn tile_spans(len: usize) -> Vec<(usize, usize)> {
-    let mut spans = Vec::with_capacity(len / TILE + 1);
+/// Splits `0..len` into spans with no narrow trailing remainder.
+fn tile_spans(len: usize, edge: usize) -> Vec<(usize, usize)> {
+    let mut spans = Vec::with_capacity(len / edge + 1);
     let mut start = 0;
     while start < len {
         let remaining = len - start;
-        let size = if remaining < TILE + MIN_TILE {
+        let size = if remaining < edge + MIN_TILE {
             remaining
         } else {
-            TILE
+            edge
         };
         spans.push((start, size));
         start += size;
     }
     spans
+}
+
+/// Sample current and last queued pixels to choose a tiling strategy. A wrong
+/// *prediction* only selects a less efficient tile size: every tile is still
+/// compared byte-for-byte, so this never loses a changed pixel. This remains
+/// cheap even at Retina resolutions (64 sampled pixels).
+fn use_dense_tiles(data: &[u8], shown: &[u8], w: usize, h: usize, stride: usize) -> bool {
+    const GRID: usize = 8;
+    const THRESHOLD: usize = 16;
+    let mut changed = 0;
+    for gy in 0..GRID {
+        let y = (2 * gy + 1) * h / (2 * GRID);
+        for gx in 0..GRID {
+            let x = (2 * gx + 1) * w / (2 * GRID);
+            let src = y * stride + x * 4;
+            let old = (y * w + x) * 4;
+            if data[src..src + 3] != shown[old..old + 3] {
+                changed += 1;
+                if changed >= THRESHOLD {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Counters for the stats readout. All monotonic within a session.
@@ -124,6 +150,11 @@ struct Inner {
     clear: ClearCodecEncoder,
     /// Next ClearCodec `seqNumber`; advanced only for streams actually sent.
     clear_seq: u8,
+    /// Rolling diagnostics: capture-to-EGFX encode + queue time, not wire ACK time.
+    raw_profile_frames: u64,
+    raw_profile_us: u64,
+    raw_profile_tiles: u64,
+    raw_profile_bytes: u64,
 }
 
 fn pack(width: u16, height: u16) -> u32 {
@@ -150,6 +181,10 @@ impl VideoHub {
                 shown: Vec::new(),
                 clear: ClearCodecEncoder::new(),
                 clear_seq: 0,
+                raw_profile_frames: 0,
+                raw_profile_us: 0,
+                raw_profile_tiles: 0,
+                raw_profile_bytes: 0,
             }),
             channel_open: AtomicBool::new(false),
             session_size: AtomicU32::new(pack(1920, 1080)),
@@ -192,6 +227,10 @@ impl VideoHub {
         inner.shown.clear();
         inner.clear = ClearCodecEncoder::new();
         inner.clear_seq = 0;
+        inner.raw_profile_frames = 0;
+        inner.raw_profile_us = 0;
+        inner.raw_profile_tiles = 0;
+        inner.raw_profile_bytes = 0;
         self.avc.store(true, Ordering::Release);
         self.frames_acked.store(0, Ordering::Release);
         self.ack_latency_us.store(0, Ordering::Release);
@@ -457,6 +496,7 @@ impl VideoHub {
     /// can't be sent (backpressure) is simply dropped: the next one is diffed against what the
     /// client really has, so nothing is lost. `Sent` is also returned when nothing changed.
     pub fn submit_bgra(&self, data: &[u8], width: u16, height: u16, stride: usize) -> SubmitResult {
+        let started = Instant::now();
         if !self.channel_open.load(Ordering::Acquire) || self.avc.load(Ordering::Acquire) {
             return SubmitResult::NotReady;
         }
@@ -481,17 +521,32 @@ impl VideoHub {
         let (Some(handle), Some(sender)) = (inner.handle.clone(), inner.sender.clone()) else {
             return SubmitResult::NotReady;
         };
+        // Avoid spending milliseconds encoding a large frame if EGFX is already
+        // blocked on client ACKs. Check again before posting in case state changes.
+        {
+            let gfx = handle.lock().unwrap_or_else(|e| e.into_inner());
+            if !gfx.is_ready() || gfx.should_backpressure() {
+                return SubmitResult::NotReady;
+            }
+        }
         if inner.surface.is_none() {
             inner.shown.clear();
         }
         let full = inner.shown.len() != row * h;
+        let tile_size = if !full && use_dense_tiles(data, &inner.shown, w, h, stride) {
+            TILE_DENSE
+        } else {
+            TILE_SMALL
+        };
 
         // Encode changed tiles before taking the pipeline lock (encoding is the slow part).
         let mut tiles = Vec::new();
+        let mut changed_rects = Vec::new();
         let mut bytes = 0usize;
-        let mut tile_buf = Vec::with_capacity(TILE * 2 * TILE * 2 * 4);
-        for &(ty, th) in &tile_spans(h) {
-            for &(tx, tw) in &tile_spans(w) {
+        let mut tile_buf =
+            Vec::with_capacity((TILE_DENSE + MIN_TILE) * (TILE_DENSE + MIN_TILE) * 4);
+        for &(ty, th) in &tile_spans(h, tile_size) {
+            for &(tx, tw) in &tile_spans(w, tile_size) {
                 let changed = full
                     || (ty..ty + th).any(|y| {
                         let src = &data[y * stride + tx * 4..y * stride + (tx + tw) * 4];
@@ -508,6 +563,7 @@ impl VideoHub {
                 // Tile sizes are bounded by the u16 session size.
                 let bitmap_data = inner.clear.encode(&tile_buf, tw as u16, th as u16);
                 bytes += bitmap_data.len();
+                changed_rects.push((tx, ty, tw, th));
                 tiles.push(MixedTilePayload::ClearCodec {
                     destination: ExclusiveRectangle {
                         left: tx as u16,
@@ -554,14 +610,45 @@ impl VideoHub {
         if frame_id.is_some() {
             inner.clear_seq = seq;
             if full {
-                inner.shown = vec![0; row * h];
+                inner.shown.resize(row * h, 0);
             }
-            for y in 0..h {
-                inner.shown[y * row..(y + 1) * row]
-                    .copy_from_slice(&data[y * stride..y * stride + row]);
+            // When a small window changes, copying the entire Retina screen
+            // (~20 MiB at 2776x1938) on every frame is unnecessary. Cache only
+            // the tiles actually queued, keeping the diff baseline accurate.
+            for &(tx, ty, tw, th) in &changed_rects {
+                let byte_x = tx * 4;
+                let byte_w = tw * 4;
+                for y in ty..ty + th {
+                    let src = y * stride + byte_x;
+                    let dst = y * row + byte_x;
+                    inner.shown[dst..dst + byte_w].copy_from_slice(&data[src..src + byte_w]);
+                }
             }
             inner.frames_sent += 1;
             inner.bytes_sent += bytes as u64;
+            inner.raw_profile_frames += 1;
+            inner.raw_profile_us = inner
+                .raw_profile_us
+                .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            inner.raw_profile_tiles += changed_rects.len() as u64;
+            inner.raw_profile_bytes += bytes as u64;
+            if inner.raw_profile_frames >= 30 {
+                let frames = inner.raw_profile_frames;
+                info!(
+                    avg_encode_ms = inner.raw_profile_us / frames / 1000,
+                    avg_tiles = inner.raw_profile_tiles / frames,
+                    avg_kib = inner.raw_profile_bytes / frames / 1024,
+                    ack_ms = self.ack_latency_us.load(Ordering::Acquire) / 1000,
+                    in_flight = inner
+                        .frames_sent
+                        .saturating_sub(self.frames_acked.load(Ordering::Acquire)),
+                    "ClearCodec mobile performance"
+                );
+                inner.raw_profile_frames = 0;
+                inner.raw_profile_us = 0;
+                inner.raw_profile_tiles = 0;
+                inner.raw_profile_bytes = 0;
+            }
             SubmitResult::Sent
         } else {
             inner.frames_dropped += 1;
