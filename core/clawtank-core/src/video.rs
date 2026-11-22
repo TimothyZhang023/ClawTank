@@ -273,7 +273,14 @@ impl VideoHub {
         let use_avc = client_avc && preference != VideoPreference::ClearCodec;
         self.avc.store(use_avc, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
-            info!(width = w, height = h, client_avc, ?preference, use_avc, "EGFX ready; requesting video");
+            info!(
+                width = w,
+                height = h,
+                client_avc,
+                ?preference,
+                use_avc,
+                "EGFX ready; requesting video"
+            );
             (self.sink)(CoreEvent::VideoStart {
                 width: w,
                 height: h,
@@ -622,7 +629,10 @@ mod video_preference_tests {
     #[test]
     fn only_implemented_graphics_modes_are_accepted() {
         assert_eq!(VideoPreference::from_u32(0), Some(VideoPreference::Auto));
-        assert_eq!(VideoPreference::from_u32(1), Some(VideoPreference::ClearCodec));
+        assert_eq!(
+            VideoPreference::from_u32(1),
+            Some(VideoPreference::ClearCodec)
+        );
         assert_eq!(VideoPreference::from_u32(2), Some(VideoPreference::Avc420));
         // AVC444 dual-stream encoding and H.265 wire support are not implemented.
         assert_eq!(VideoPreference::from_u32(3), None);
