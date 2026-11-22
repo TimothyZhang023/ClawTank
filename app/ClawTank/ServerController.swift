@@ -134,7 +134,7 @@ final class ServerController: ObservableObject {
                 humanActivity.touch()
                 input.handle($0)
             })
-            guard created.setVideoMode(settings.videoMode) else {
+            if !created.setVideoMode(settings.videoMode) {
                 log.error("Unable to apply graphics codec preference")
             }
             fileServer.attach(created)
