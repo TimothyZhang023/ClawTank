@@ -73,7 +73,7 @@ enum VideoMode: String, CaseIterable, Identifiable, Sendable {
         case .automatic: "Use H.264 when the client supports it; otherwise ClearCodec."
         case .clearCodec: "Prefer lossless tiles for sharp text; CPU and bandwidth may be higher."
         case .avc420: "Prefer hardware H.264; automatically use ClearCodec if the client disables AVC."
-        case .avc444: "Prefer dual H.264 streams for sharper color text; fall back to AVC420 or ClearCodec when unsupported."
+        case .avc444: "Prefer dual H.264 streams for sharper color text; fall back when unsupported."
         case .hevc: "Azure HEVC requires compatible newer clients and an extended RDPGFX capability set."
         }
     }
