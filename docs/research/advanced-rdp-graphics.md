@@ -92,31 +92,31 @@ VideoToolbox HEVC encoder and verified decoder/interoperability tests.
 
 Run this on the Mac while connecting with Windows App or another RDP client:
 
-\`\`\`bash
+```bash
 log stream --info --style compact \
   --predicate 'subsystem == "dev.clawtank.ClawTank" AND category == "core" AND eventMessage CONTAINS "RDPGFX_"'
-\`\`\`
+```
 
-The macOS app forwards Rust \`tracing\` INFO events through \`CoreBridge\` to
-the \`dev.clawtank.ClawTank/core\` unified log. No debug mode is required.
-Entries share a \`gfx_session\` number (starts at 1 per server process):
+The macOS app forwards Rust `tracing` INFO events through `CoreBridge` to
+the `dev.clawtank.ClawTank/core` unified log. No debug mode is required.
+Entries share a `gfx_session` number (starts at 1 per server process):
 
-1. \`RDPGFX_CAPS_ADVERTISE\`: all *client-offered* versions, raw flag values and,
+1. `RDPGFX_CAPS_ADVERTISE`: all *client-offered* versions, raw flag values and,
    for known versions, AVC420/AVC444 decoder availability. Unknown Azure 11.x
-   versions are logged as \`unknown-version\` rather than assumed supported.
-2. \`RDPGFX_SERVER_CAPABILITIES\`: all server-offered EGFX versions and flags.
-3. \`RDPGFX_CAPS_CONFIRM\`: the single negotiated version/flags and allowed
+   versions are logged as `unknown-version` rather than assumed supported.
+2. `RDPGFX_SERVER_CAPABILITIES`: all server-offered EGFX versions and flags.
+3. `RDPGFX_CAPS_CONFIRM`: the single negotiated version/flags and allowed
    codec families.
-4. \`RDPGFX_CODEC_SELECTED\`: requested setting, effective wire codec, display
+4. `RDPGFX_CODEC_SELECTED`: requested setting, effective wire codec, display
    size, and explicit fallback reason (for example
-   \`fallback-client-avc-unavailable\` or \`fallback-avc444-to-avc420\`).
-5. \`RDPGFX_FIRST_FRAME_SENT\`: actual first successful video submission
+   `fallback-client-avc-unavailable` or `fallback-avc444-to-avc420`).
+5. `RDPGFX_FIRST_FRAME_SENT`: actual first successful video submission
    (ClearCodec, AVC420 or AVC444), not just a completed negotiation.
-6. \`RDPGFX_CHANNEL_CLOSED\`: EGFX session end.
+6. `RDPGFX_CHANNEL_CLOSED`: EGFX session end.
 
-For the tested iPad with V10.4 + \`AVC_DISABLED\`, step 3 should show
-\`AVC420=false,AVC444=false\`; step 4 should select \`Raw\`, and step 5 should
-send \`ClearCodec\`. If the first-frame entry never appears, investigate
+For the tested iPad with V10.4 + `AVC_DISABLED`, step 3 should show
+`AVC420=false,AVC444=false`; step 4 should select `Raw`, and step 5 should
+send `ClearCodec`. If the first-frame entry never appears, investigate
 capture permissions, backpressure and the VideoToolbox/CG output rather than
 blaming capability negotiation.
 
