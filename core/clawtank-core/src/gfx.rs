@@ -15,7 +15,7 @@ use ironrdp_server::{
     GfxDvcBridge, GfxServerFactory, GfxServerHandle, ServerEvent, ServerEventSender,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::video::VideoHub;
 
