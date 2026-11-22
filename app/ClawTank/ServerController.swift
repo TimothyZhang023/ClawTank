@@ -91,12 +91,8 @@ final class ServerController: ObservableObject {
         overlayFlag.set(settings.showsStatsOverlay)
         settings.$showsStatsOverlay.sink { [overlayFlag] in overlayFlag.set($0) }.store(in: &subscriptions)
         settings.$swapControlCommand.sink { [input] in input.setSwapControlCommand($0) }.store(in: &subscriptions)
-        settings.$videoMode.sink { [weak self] mode in
-            // Takes effect on the next EGFX negotiation, not mid-frame.
-            if let self, let server = self.server, !server.setVideoMode(mode) {
-                self.log.warning("Rejected unsupported video mode: \(mode.rawValue, privacy: .public)")
-            }
-        }.store(in: &subscriptions)
+        // The core applies this preference on the next EGFX negotiation only.
+        settings.$videoMode.sink { [weak self] in _ = self?.server?.setVideoMode($0) }.store(in: &subscriptions)
         let center = DistributedNotificationCenter.default()
         center.publisher(for: Notification.Name("com.apple.screenIsLocked"))
             .receive(on: RunLoop.main)
