@@ -84,8 +84,7 @@ private struct DisplaySettings: View {
             }
             Text(settings.videoMode.explanation)
                 .font(.callout).foregroundStyle(.secondary)
-            Text("AVC444 needs dual H.264 streams; H.265 is not a standard RDP EGFX codec. " +
-                 "These modes are shown for reference but cannot be selected yet.")
+            Text("AVC444 requires compatible clients; Azure-specific HEVC is not enabled in this build.")
                 .font(.callout).foregroundStyle(.secondary)
             Text("Changes apply from the next connection or window resize.")
                 .font(.callout).foregroundStyle(.secondary)

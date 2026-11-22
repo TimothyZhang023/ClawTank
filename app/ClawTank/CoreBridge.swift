@@ -214,11 +214,33 @@ final class RdpServer: @unchecked Sendable {
         }
     }
 
+    /// Deliver a matching pair of Annex-B H.264 streams as one EGFX AVC444 frame.
+    func submitAVC444(luma: Data, chroma: Data, keyframe: Bool, width: Int, height: Int) -> SubmitResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return .notReady }
+        let result = luma.withUnsafeBytes { lumaBytes in
+            chroma.withUnsafeBytes { chromaBytes in
+                ct_server_submit_avc444(
+                    handle, lumaBytes.bindMemory(to: UInt8.self).baseAddress, lumaBytes.count,
+                    chromaBytes.bindMemory(to: UInt8.self).baseAddress, chromaBytes.count,
+                    keyframe, UInt16(clamping: width), UInt16(clamping: height))
+            }
+        }
+        switch result {
+        case CT_SUBMIT_RESULT_SENT: return .sent
+        case CT_SUBMIT_RESULT_NEED_KEYFRAME: return .needKeyframe
+        default: return .notReady
+        }
+    }
+
     /// How the current session wants video (read on `videoStart`).
     enum VideoCodec {
-        /// H.264 via `submitH264`.
+        /// H.264 AVC420 via `submitH264`.
         case h264
-        /// Raw BGRA via `submitBGRA`: the client has no H.264 decoder (Windows App on Android/iOS).
+        /// H.264 AVC444 through two synchronized bitstreams.
+        case avc444
+        /// Raw BGRA via `submitBGRA` for AVC_DISABLED clients.
         case raw
     }
 
@@ -226,7 +248,11 @@ final class RdpServer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let handle else { return .h264 }
-        return ct_server_video_codec(handle) == CT_VIDEO_CODEC_RAW ? .raw : .h264
+        switch ct_server_video_codec(handle) {
+        case CT_VIDEO_CODEC_RAW: return .raw
+        case CT_VIDEO_CODEC_AVC444: return .avc444
+        default: return .h264
+        }
     }
 
     /// Hands one raw BGRA frame (top-down rows, `stride` bytes apart; the top-left
