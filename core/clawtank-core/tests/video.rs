@@ -156,3 +156,77 @@ async fn submitted_h264_reaches_an_egfx_client() {
     );
     server.stop();
 }
+
+/// Regression: a Retina-sized client must survive the initial bitmap and EGFX handshake.
+/// Tests the 2776×1938 size from an Intel Mac beta report without requiring real capture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retina_sized_egfx_session_reaches_first_frame() {
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let server = server::start(
+        ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            username: USER.to_owned(),
+            password: PASSWORD.to_owned(),
+            identity: TlsIdentity::generate("retina-test.local").unwrap(),
+            policy: clawtank_core::access::AccessPolicy::lan_only(),
+        },
+        Arc::new(move |event| log.lock().unwrap().push(event)),
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+
+    let video = Arc::clone(server.video());
+    let recorder = client::EgfxRecorder::default();
+    let (result, mut session, _) = client::connect(
+        server.local_addr(),
+        USER,
+        PASSWORD,
+        2776,
+        1938,
+        Some(&recorder),
+    )
+    .await
+    .expect("Retina-sized RDP connection");
+
+    let mut submitted = false;
+    let connection_started = std::time::Instant::now();
+    let ok = client::pump_until(result, &mut session, Duration::from_secs(20), {
+        let events = Arc::clone(&events);
+        let recorder = recorder.clone();
+        move || {
+            if !submitted
+                && events.lock().unwrap().iter().any(|event| {
+                    matches!(
+                        event,
+                        CoreEvent::VideoStart {
+                            width: 2776,
+                            height: 1938
+                        }
+                    )
+                })
+            {
+                assert_eq!(
+                    video.submit_h264(FAKE_IDR, true, 2776, 1938),
+                    SubmitResult::Sent
+                );
+                submitted = true;
+            }
+            // Stay connected beyond the initial legacy-frame grace period to detect
+            // premature protocol disconnects rather than stopping at the first H.264 frame.
+            recorder.frame_count() >= 1
+                && connection_started.elapsed() >= Duration::from_millis(1500)
+        }
+    })
+    .await
+    .expect("Retina-sized EGFX session did not terminate unexpectedly");
+    assert!(
+        ok,
+        "No first EGFX frame at 2776×1938: {:?}",
+        events.lock().unwrap()
+    );
+    assert_eq!(*recorder.reset_size.lock().unwrap(), Some((2776, 1938)));
+
+    drop(session);
+    server.stop();
+}
