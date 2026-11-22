@@ -1,0 +1,22 @@
+[package]
+name = "ironrdp-acceptor"
+version = "0.10.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+description = "State machines to drive an RDP connection acceptance sequence"
+repository = "https://github.com/Devolutions/IronRDP"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+ironrdp-core = { version = "0.2", features = ["alloc"] }
+ironrdp-pdu = "0.9"
+ironrdp-svc = "0.8"
+ironrdp-connector = "0.10"
+ironrdp-async = "0.10"
+tracing = { version = "0.1", features = ["log"] }

@@ -819,7 +819,7 @@ impl RdpServer {
         // before looking at the later RDPGFX codec negotiation. Never log credentials.
         info!(
             rdp_stage = "demand_active",
-            server_core_version = "0x00080004",
+            server_core_version = "0x00080005",
             count = capabilities.len(),
             server_caps = ?capabilities,
             "RDP_HANDSHAKE_SERVER_CAPS"
