@@ -121,6 +121,14 @@ pub(crate) fn avc420_allowed(caps: &CapabilitySet) -> bool {
     }
 }
 
+/// AVC444 uses the same AVC_DISABLED restriction, but requires V10 or newer.
+pub(crate) fn avc444_allowed(caps: &CapabilitySet) -> bool {
+    match caps {
+        CapabilitySet::V8 { .. } | CapabilitySet::V8_1 { .. } => false,
+        _ => avc420_allowed(caps),
+    }
+}
+
 impl GraphicsPipelineHandler for GfxHandler {
     fn capabilities_advertise(&mut self, pdu: &CapabilitiesAdvertisePdu) {
         info!(?pdu, "Client EGFX capabilities advertised");
@@ -131,9 +139,10 @@ impl GraphicsPipelineHandler for GfxHandler {
     }
 
     fn on_ready(&mut self, negotiated: &CapabilitySet) {
-        let avc = avc420_allowed(negotiated);
-        info!(?negotiated, avc, "EGFX capabilities negotiated");
-        self.hub.on_ready(avc);
+        let avc420 = avc420_allowed(negotiated);
+        let avc444 = avc444_allowed(negotiated);
+        info!(?negotiated, avc420, avc444, "EGFX capabilities negotiated");
+        self.hub.on_ready(avc420, avc444);
     }
 
     fn on_frame_ack(&mut self, frame_id: u32, _queue_depth: u32, _total_frames_decoded: u32) {
