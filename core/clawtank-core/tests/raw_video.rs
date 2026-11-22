@@ -153,8 +153,8 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
 
     assert_eq!(
         *recorder.confirmed.lock().unwrap(),
-        Some(CapabilitySet::V10 {
-            flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED
+        Some(CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED
         }),
         "AVC_DISABLED must survive negotiation"
     );
