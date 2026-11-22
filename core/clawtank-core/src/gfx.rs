@@ -159,7 +159,12 @@ fn capability_summary(raw: &RawCapabilitySet) -> String {
 
 impl GraphicsPipelineHandler for GfxHandler {
     fn capabilities_advertise(&mut self, pdu: &CapabilitiesAdvertisePdu) {
-        let capabilities = pdu.0.iter().map(capability_summary).collect::<Vec<_>>().join("; ");
+        let capabilities = pdu
+            .0
+            .iter()
+            .map(capability_summary)
+            .collect::<Vec<_>>()
+            .join("; ");
         info!(
             gfx_session = self.hub.session_id(),
             client_capset_count = pdu.0.len(),

@@ -96,9 +96,7 @@ fn selected_codec(
         VideoPreference::Avc420 if client_avc420 => (VideoCodec::H264, "requested-avc420"),
         VideoPreference::Avc420 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
         VideoPreference::Avc444 if client_avc444 => (VideoCodec::Avc444, "requested-avc444"),
-        VideoPreference::Avc444 if client_avc420 => {
-            (VideoCodec::H264, "fallback-avc444-to-avc420")
-        }
+        VideoPreference::Avc444 if client_avc420 => (VideoCodec::H264, "fallback-avc444-to-avc420"),
         VideoPreference::Avc444 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
     }
 }
@@ -347,7 +345,8 @@ impl VideoHub {
         let preference = self.preference();
         let (codec, reason) = selected_codec(preference, client_avc420, client_avc444);
         self.avc.store(codec != VideoCodec::Raw, Ordering::Release);
-        self.avc444.store(codec == VideoCodec::Avc444, Ordering::Release);
+        self.avc444
+            .store(codec == VideoCodec::Avc444, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
             info!(
                 gfx_session = self.session_id(),
@@ -505,7 +504,11 @@ impl VideoHub {
 
         if sent {
             if inner.frames_sent == 0 {
-                info!(gfx_session = self.session_id(), codec = "AVC420", "RDPGFX_FIRST_FRAME_SENT");
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "AVC420",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
             }
             inner.need_keyframe = false;
             inner.frames_sent += 1;
@@ -575,7 +578,11 @@ impl VideoHub {
         Self::post(&sender, channel_id, messages);
         if frame_id.is_some() {
             if inner.frames_sent == 0 {
-                info!(gfx_session = self.session_id(), codec = "AVC444", "RDPGFX_FIRST_FRAME_SENT");
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "AVC444",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
             }
             inner.need_keyframe = false;
             inner.frames_sent += 1;
@@ -774,7 +781,11 @@ impl VideoHub {
 
         if frame_id.is_some() {
             if inner.frames_sent == 0 {
-                info!(gfx_session = self.session_id(), codec = "ClearCodec", "RDPGFX_FIRST_FRAME_SENT");
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "ClearCodec",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
             }
             inner.clear_seq = seq;
             if full {
