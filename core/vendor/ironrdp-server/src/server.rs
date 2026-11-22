@@ -110,11 +110,7 @@ fn log_handshake_capabilities(stage: &'static str, caps: &[CapabilitySet]) {
                 c.desktop_resize_flag,
                 c.drawing_flags.bits()
             ),
-            CapabilitySet::Order(c) => format!(
-                "flags=0x{:X},extra=0x{:X}",
-                c.order_flags.bits(),
-                c.order_support_ex_flags.bits()
-            ),
+            CapabilitySet::Order(_) => "present".to_owned(),
             CapabilitySet::SurfaceCommands(c) => format!("flags=0x{:08X}", c.flags.bits()),
             CapabilitySet::FrameAcknowledge(c) => {
                 format!("max_unacked_frames={}", c.max_unacknowledged_frame_count)
