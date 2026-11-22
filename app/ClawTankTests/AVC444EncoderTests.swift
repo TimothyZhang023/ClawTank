@@ -51,12 +51,12 @@ final class AVC444EncoderTests: XCTestCase {
     }
 
     func testAVC444ProducesTwoIndependentH264AccessUnits() throws {
-        var settings = H264Encoder.Settings(width: 32, height: 16, frameRate: 30,
+        var settings = H264Encoder.Settings(width: 640, height: 368, frameRate: 30,
                                             averageBitRate: 2_000_000, requireHardware: false)
         settings.keyframeIntervalSeconds = 1
         let dual = try AVC444Encoder(settings: settings)
         let frame = try XCTUnwrap(dual.encode(
-            makeBGRA(), presentationTime: .zero, forceKeyframe: true))
+            makeBGRA(width: 640, height: 368), presentationTime: .zero, forceKeyframe: true))
         XCTAssertTrue(frame.isKeyframe)
         XCTAssertTrue(frame.luma.starts(with: [0, 0, 0, 1]))
         XCTAssertTrue(frame.chroma.starts(with: [0, 0, 0, 1]))
