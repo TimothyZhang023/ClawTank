@@ -91,6 +91,8 @@ final class ServerController: ObservableObject {
         overlayFlag.set(settings.showsStatsOverlay)
         settings.$showsStatsOverlay.sink { [overlayFlag] in overlayFlag.set($0) }.store(in: &subscriptions)
         settings.$swapControlCommand.sink { [input] in input.setSwapControlCommand($0) }.store(in: &subscriptions)
+        // The core applies this preference on the next EGFX negotiation only.
+        settings.$videoMode.sink { [weak self] in _ = self?.server?.setVideoMode($0) }.store(in: &subscriptions)
         let center = DistributedNotificationCenter.default()
         center.publisher(for: Notification.Name("com.apple.screenIsLocked"))
             .receive(on: RunLoop.main)
@@ -132,6 +134,9 @@ final class ServerController: ObservableObject {
                 humanActivity.touch()
                 input.handle($0)
             })
+            if !created.setVideoMode(settings.videoMode) {
+                log.error("Unable to apply graphics codec preference")
+            }
             fileServer.attach(created)
             server = created
             status = .listening(port: server?.port ?? port)
@@ -304,6 +309,10 @@ final class ServerController: ObservableObject {
         cursor = nil
     }
 
+}
+
+// Video lifecycle (same file, so it keeps access to the controller's private state).
+extension ServerController {
     private func fail(_ message: String) {
         log.error("\(message, privacy: .public)")
         endSession()
@@ -312,10 +321,6 @@ final class ServerController: ObservableObject {
         status = .failed(message)
     }
 
-}
-
-// Video lifecycle (same file, so it keeps access to the controller's private state).
-extension ServerController {
     /// Starts (or, after a resize, restarts) video at `width`×`height`. Start, stop and restart
     /// run strictly in order on `videoTask` so a resize can't race a disconnect.
     private func startVideo(width: Int, height: Int, scalePercent: Int?) {

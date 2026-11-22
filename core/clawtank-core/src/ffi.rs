@@ -20,7 +20,7 @@ use crate::events::CoreEvent;
 use crate::input::InputEvent;
 use crate::server::{self, ServerConfig, ServerHandle};
 use crate::tls::TlsIdentity;
-use crate::video::{SubmitResult, VideoCodec};
+use crate::video::{SubmitResult, VideoCodec, VideoPreference};
 
 /// Result code for FFI calls.
 #[repr(C)]
@@ -111,6 +111,8 @@ pub enum CtVideoCodec {
     /// Raw BGRA frames with `ct_server_submit_bgra`: the client negotiated the graphics
     /// pipeline without AVC (Windows App on Android/iOS).
     Raw = 1,
+    /// AVC444 paired H.264 bitstreams.
+    Avc444 = 2,
 }
 
 /// Video counters for the current session.
@@ -617,6 +619,40 @@ pub unsafe extern "C" fn ct_server_submit_h264(
     }
 }
 
+/// Submit paired Annex-B H.264 bitstreams in a single RDPGFX AVC444 frame.
+/// Both streams must correspond to the same timestamp and coded image size.
+///
+/// # Safety
+/// A live server and readable luma/chroma pointers of the specified lengths are required.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ct_server_submit_avc444(
+    server: *const CtServer,
+    luma: *const u8,
+    luma_len: usize,
+    chroma: *const u8,
+    chroma_len: usize,
+    keyframe: bool,
+    width: u16,
+    height: u16,
+) -> CtSubmitResult {
+    let (Some(server), Some(luma), Some(chroma)) = (
+        unsafe { server.as_ref() },
+        unsafe { bytes(luma, luma_len) },
+        unsafe { bytes(chroma, chroma_len) },
+    ) else {
+        return CtSubmitResult::NotReady;
+    };
+    match server
+        .handle
+        .video()
+        .submit_avc444(luma, chroma, keyframe, width, height)
+    {
+        SubmitResult::Sent => CtSubmitResult::Sent,
+        SubmitResult::NotReady => CtSubmitResult::NotReady,
+        SubmitResult::NeedKeyframe => CtSubmitResult::NeedKeyframe,
+    }
+}
+
 /// Submits one raw frame for a session whose `ct_server_video_codec` is `Raw`: 32-bit BGRA
 /// (alpha ignored), rows top-down and `stride` bytes apart; the top-left `width`×`height`
 /// pixels (the session size) are read. Only changed areas are sent. Returns `NotReady` when
@@ -995,6 +1031,30 @@ pub unsafe extern "C" fn ct_server_video_can_accept(server: *const CtServer) -> 
     unsafe { server.as_ref() }.is_some_and(|s| s.handle.video().can_accept())
 }
 
+/// Sets the preferred video codec for future EGFX negotiations.
+/// 0=Auto, 1=ClearCodec lossless, 2=H.264 AVC420.
+/// AVC444 (3) is implemented. Azure-specific H.265/HEVC (4) is not.
+/// A client advertising AVC_DISABLED always receives ClearCodec regardless of
+/// a request to use AVC420. Current sessions do not switch codec.
+/// Returns false for null pointers or unsupported preferences.
+///
+/// # Safety
+/// `server` must be null or a live pointer returned by `ct_server_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ct_server_set_video_preference(
+    server: *const CtServer,
+    preference: u32,
+) -> bool {
+    let Some(server) = (unsafe { server.as_ref() }) else {
+        return false;
+    };
+    let Some(preference) = VideoPreference::from_u32(preference) else {
+        return false;
+    };
+    server.handle.video().set_preference(preference);
+    true
+}
+
 /// How the host must submit video for the current session; valid from `VideoStart` on.
 /// `H264` for a null server.
 ///
@@ -1005,6 +1065,7 @@ pub unsafe extern "C" fn ct_server_video_codec(server: *const CtServer) -> CtVid
     // SAFETY: null or live per the contract.
     match unsafe { server.as_ref() }.map(|s| s.handle.video().codec()) {
         Some(VideoCodec::Raw) => CtVideoCodec::Raw,
+        Some(VideoCodec::Avc444) => CtVideoCodec::Avc444,
         _ => CtVideoCodec::H264,
     }
 }
@@ -1208,6 +1269,8 @@ mod tests {
                 CtSubmitResult::NotReady
             );
             assert!(!ct_server_video_can_accept(null()));
+            assert!(!ct_server_set_video_preference(null(), 0));
+            assert!(!ct_server_set_video_preference(null(), 3));
             assert_eq!(ct_server_video_codec(null()), CtVideoCodec::H264);
             assert_eq!(ct_server_video_stats(null()), CtVideoStats::default());
             ct_server_stop(null_mut());

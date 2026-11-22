@@ -77,6 +77,15 @@ private struct DisplaySettings: View {
             Picker("Quality", selection: $settings.quality) {
                 ForEach(QualityPreset.allCases) { Text($0.title).tag($0) }
             }
+            Picker("Graphics codec", selection: $settings.videoMode) {
+                ForEach(VideoMode.allCases) { mode in
+                    Text(mode.title).tag(mode).disabled(!mode.isAvailable)
+                }
+            }
+            Text(settings.videoMode.explanation)
+                .font(.callout).foregroundStyle(.secondary)
+            Text("AVC444 requires compatible clients; Azure-specific HEVC is not enabled in this build.")
+                .font(.callout).foregroundStyle(.secondary)
             Text("Changes apply from the next connection or window resize.")
                 .font(.callout).foregroundStyle(.secondary)
         }

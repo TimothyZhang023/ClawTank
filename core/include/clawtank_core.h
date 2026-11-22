@@ -210,6 +210,8 @@ typedef enum {
    * pipeline without AVC (Windows App on Android/iOS).
    */
   CT_VIDEO_CODEC_RAW = 1,
+  /** Paired H.264 AVC444 bitstreams. */
+  CT_VIDEO_CODEC_AVC444 = 2,
 } CtVideoCodec;
 
 /**
@@ -429,6 +431,16 @@ CtSubmitResult ct_server_submit_h264(const CtServer *server,
                                      uint16_t width,
                                      uint16_t height);
 
+/** Send two synchronized H.264 Annex-B streams in one AVC444 graphics frame. */
+CtSubmitResult ct_server_submit_avc444(const CtServer *server,
+                                       const uint8_t *luma,
+                                       size_t luma_len,
+                                       const uint8_t *chroma,
+                                       size_t chroma_len,
+                                       bool keyframe,
+                                       uint16_t width,
+                                       uint16_t height);
+
 /**
  * Submits one raw frame for a session whose `ct_server_video_codec` is `Raw`: 32-bit BGRA
  * (alpha ignored), rows top-down and `stride` bytes apart; the top-left `width`×`height`
@@ -593,6 +605,19 @@ void ct_server_hide_pointer(const CtServer *server);
  * `server` must be null or a live pointer from `ct_server_start`.
  */
 bool ct_server_video_can_accept(const CtServer *server);
+
+/**
+ * Set the preferred RDP graphics codec for future connections:
+ * 0=Automatic, 1=ClearCodec, 2=AVC420, 3=AVC444.
+ * Azure HEVC (4) and other unsupported values return false.
+ * If the client advertised AVC_DISABLED, ClearCodec is always selected.
+ * An existing session keeps its codec until reconnect.
+ * Returns false for a null server.
+ *
+ * # Safety
+ * `server` must be null or a live pointer returned by `ct_server_start`.
+ */
+bool ct_server_set_video_preference(const CtServer *server, uint32_t preference);
 
 /**
  * How the host must submit video for the current session; valid from `VideoStart` on.

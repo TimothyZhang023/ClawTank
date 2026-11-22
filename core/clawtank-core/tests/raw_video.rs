@@ -105,10 +105,22 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
     };
     let first = frame(false);
     let second = frame(true);
+    // Dense animation: every pixel changes, which should prefer 128x128
+    // tiles after the sparse 64x64 update to reduce tile/wire overhead.
+    let mut third = second.clone();
+    for row in 0..usize::from(H) {
+        for col in 0..usize::from(W) {
+            let offset = row * STRIDE + col * 4;
+            third[offset] ^= 0x5A;
+            third[offset + 1] ^= 0x33;
+            third[offset + 2] ^= 0xC3;
+        }
+    }
     let ok = client::pump_until(result, &mut session, Duration::from_secs(15), {
         let video = Arc::clone(&video);
         let recorder = recorder.clone();
         let second = second.clone();
+        let third = third.clone();
         let mut step = 0;
         move || {
             if !started() {
@@ -139,8 +151,15 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
                     false
                 }
                 2 if recorder.frame_count() >= 2 => {
-                    // Nothing changed: nothing to send, nothing owed.
+                    // An identical frame needs no new wire tiles.
                     assert_eq!(video.submit_bgra(&second, W, H, STRIDE), SubmitResult::Sent);
+                    if video.submit_bgra(&third, W, H, STRIDE) == SubmitResult::Sent {
+                        step = 3;
+                    }
+                    false
+                }
+                3 if recorder.frame_count() >= 3 => {
+                    assert_eq!(video.submit_bgra(&third, W, H, STRIDE), SubmitResult::Sent);
                     true
                 }
                 _ => false,
@@ -153,8 +172,8 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
 
     assert_eq!(
         *recorder.confirmed.lock().unwrap(),
-        Some(CapabilitySet::V10 {
-            flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED
+        Some(CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED
         }),
         "AVC_DISABLED must survive negotiation"
     );
@@ -170,10 +189,13 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
     // Rebuild the picture from the tiles and compare with the last submitted frame.
     let tiles = recorder.clear_tiles.lock().unwrap().clone();
     let full_tiles = 10 * 6; // 640 = 10×64; 400 = 5×64 + 80 merged into the last row
+    // First frame: 10*6 small tiles. Sparse second: one 64x64 tile.
+    // Dense third: 640/128=5 columns and 400 -> 3 row spans = 15 tiles.
+    let dense_tiles = 5 * 3;
     assert_eq!(
         tiles.len(),
-        full_tiles + 1,
-        "full frame, then only the changed tile"
+        full_tiles + 1 + dense_tiles,
+        "full frame, one sparse tile, then adaptive dense tiles"
     );
     let mut decoder = ClearCodecDecoder::new();
     let mut surface = vec![0u8; W as usize * H as usize * 4];
@@ -206,7 +228,7 @@ async fn avc_disabled_client_gets_clearcodec_frames() {
     for y in 0..H as usize {
         for x in 0..W as usize {
             let got = &surface[(y * W as usize + x) * 4..][..3];
-            let want = &second[y * STRIDE + x * 4..][..3];
+            let want = &third[y * STRIDE + x * 4..][..3];
             assert_eq!(got, want, "pixel ({x}, {y})");
         }
     }

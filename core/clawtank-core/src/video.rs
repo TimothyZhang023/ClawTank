@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 use ironrdp_egfx::pdu::Avc420Region;
@@ -51,33 +51,104 @@ pub enum SubmitResult {
 pub enum VideoCodec {
     /// H.264 access units via [`VideoHub::submit_h264`] (EGFX AVC420).
     H264,
+    /// H.264 AVC444 dual-stream transport.
+    Avc444,
     /// Raw BGRA frames via [`VideoHub::submit_bgra`] (EGFX ClearCodec tiles); the client
     /// negotiated EGFX with AVC disabled.
     Raw,
 }
 
-/// Tile edge for the raw path. Remainders narrower than [`MIN_TILE`] are merged into the
-/// previous tile so every tile has more than 1024 pixels: IronRDP's ClearCodec encoder only
-/// uses its glyph cache for tiles of at most 1024 pixels, and we keep it out of play (see
-/// `submit_bgra` on sequence numbers).
-const TILE: usize = 64;
+/// Video preference. Never override a client AVC_DISABLED advertisement.
+/// HEVC requires an Azure protocol extension that is not implemented here.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoPreference {
+    Auto = 0,
+    ClearCodec = 1,
+    Avc420 = 2,
+    Avc444 = 3,
+}
+
+impl VideoPreference {
+    /// Converts a C ABI value into a supported policy.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Auto),
+            1 => Some(Self::ClearCodec),
+            2 => Some(Self::Avc420),
+            3 => Some(Self::Avc444),
+            _ => None,
+        }
+    }
+}
+
+/// Decide wire codec from the confirmed capabilities, never from a user
+/// preference alone. The reason is included in the once-per-session INFO log.
+fn selected_codec(
+    preference: VideoPreference,
+    client_avc420: bool,
+    client_avc444: bool,
+) -> (VideoCodec, &'static str) {
+    match preference {
+        VideoPreference::ClearCodec => (VideoCodec::Raw, "requested-clearcodec"),
+        VideoPreference::Auto if client_avc420 => (VideoCodec::H264, "auto-client-avc420"),
+        VideoPreference::Auto => (VideoCodec::Raw, "auto-client-avc-unavailable"),
+        VideoPreference::Avc420 if client_avc420 => (VideoCodec::H264, "requested-avc420"),
+        VideoPreference::Avc420 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
+        VideoPreference::Avc444 if client_avc444 => (VideoCodec::Avc444, "requested-avc444"),
+        VideoPreference::Avc444 if client_avc420 => (VideoCodec::H264, "fallback-avc444-to-avc420"),
+        VideoPreference::Avc444 => (VideoCodec::Raw, "fallback-client-avc-unavailable"),
+    }
+}
+
+/// Small tiles minimize recompression around text and cursors; larger tiles reduce
+/// ClearCodec headers, allocations and DVC fragmentation for broad screen changes.
+/// The codec uses a glyph cache only for regions at most 1024 pixels, so the final
+/// short strip must be merged with its previous tile.
+const TILE_SMALL: usize = 64;
+const TILE_DENSE: usize = 128;
 const MIN_TILE: usize = 33;
 
-/// Splits `0..len` into `(start, size)` spans of about [`TILE`].
-fn tile_spans(len: usize) -> Vec<(usize, usize)> {
-    let mut spans = Vec::with_capacity(len / TILE + 1);
+/// Splits `0..len` into spans with no narrow trailing remainder.
+fn tile_spans(len: usize, edge: usize) -> Vec<(usize, usize)> {
+    let mut spans = Vec::with_capacity(len / edge + 1);
     let mut start = 0;
     while start < len {
         let remaining = len - start;
-        let size = if remaining < TILE + MIN_TILE {
+        let size = if remaining < edge + MIN_TILE {
             remaining
         } else {
-            TILE
+            edge
         };
         spans.push((start, size));
         start += size;
     }
     spans
+}
+
+/// Sample current and last queued pixels to choose a tiling strategy. A wrong
+/// *prediction* only selects a less efficient tile size: every tile is still
+/// compared byte-for-byte, so this never loses a changed pixel. This remains
+/// cheap even at Retina resolutions (64 sampled pixels).
+fn use_dense_tiles(data: &[u8], shown: &[u8], w: usize, h: usize, stride: usize) -> bool {
+    const GRID: usize = 8;
+    const THRESHOLD: usize = 16;
+    let mut changed = 0;
+    for gy in 0..GRID {
+        let y = (2 * gy + 1) * h / (2 * GRID);
+        for gx in 0..GRID {
+            let x = (2 * gx + 1) * w / (2 * GRID);
+            let src = y * stride + x * 4;
+            let old = (y * w + x) * 4;
+            if data[src..src + 3] != shown[old..old + 3] {
+                changed += 1;
+                if changed >= THRESHOLD {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Counters for the stats readout. All monotonic within a session.
@@ -105,8 +176,14 @@ pub struct VideoHub {
     /// held) and from `submit_h264` *after* the pipeline mutex is released, never nested.
     send_times: Mutex<HashMap<u32, Instant>>,
     ack_latency_us: AtomicU32,
-    /// Whether the negotiated EGFX capabilities allow AVC420 (set before `VideoStart`).
+    /// Increments each time a new EGFX pipeline is attached, for grouped logs.
+    session_id: AtomicU64,
+    /// True only when this session is both AVC-capable and policy-selected for H.264.
     avc: AtomicBool,
+    /// Current negotiated graphics path uses dual-stream AVC444.
+    avc444: AtomicBool,
+    /// Persistent preference for future sessions; updates never switch an active codec.
+    preference: AtomicU8,
 }
 
 struct Inner {
@@ -124,6 +201,11 @@ struct Inner {
     clear: ClearCodecEncoder,
     /// Next ClearCodec `seqNumber`; advanced only for streams actually sent.
     clear_seq: u8,
+    /// Rolling diagnostics: capture-to-EGFX encode + queue time, not wire ACK time.
+    raw_profile_frames: u64,
+    raw_profile_us: u64,
+    raw_profile_tiles: u64,
+    raw_profile_bytes: u64,
 }
 
 fn pack(width: u16, height: u16) -> u32 {
@@ -150,13 +232,20 @@ impl VideoHub {
                 shown: Vec::new(),
                 clear: ClearCodecEncoder::new(),
                 clear_seq: 0,
+                raw_profile_frames: 0,
+                raw_profile_us: 0,
+                raw_profile_tiles: 0,
+                raw_profile_bytes: 0,
             }),
             channel_open: AtomicBool::new(false),
             session_size: AtomicU32::new(pack(1920, 1080)),
             frames_acked: AtomicU64::new(0),
             send_times: Mutex::new(HashMap::new()),
             ack_latency_us: AtomicU32::new(0),
+            session_id: AtomicU64::new(0),
             avc: AtomicBool::new(true),
+            avc444: AtomicBool::new(false),
+            preference: AtomicU8::new(VideoPreference::Auto as u8),
         }
     }
 
@@ -167,6 +256,11 @@ impl VideoHub {
     /// The session loop's event sender (set once when the server is built).
     pub fn set_sender(&self, sender: UnboundedSender<ServerEvent>) {
         self.lock().sender = Some(sender);
+    }
+
+    /// Identifier shared by this graphics session's negotiation and frame logs.
+    pub(crate) fn session_id(&self) -> u64 {
+        self.session_id.load(Ordering::Acquire)
     }
 
     /// Desktop size negotiated for the current session; the EGFX surface uses it.
@@ -182,6 +276,7 @@ impl VideoHub {
     /// A new connection built its pipeline: forget the previous session's state.
     pub fn attach(&self, handle: GfxServerHandle) {
         let mut inner = self.lock();
+        self.session_id.fetch_add(1, Ordering::AcqRel);
         inner.handle = Some(handle);
         inner.surface = None;
         inner.need_keyframe = true;
@@ -192,7 +287,12 @@ impl VideoHub {
         inner.shown.clear();
         inner.clear = ClearCodecEncoder::new();
         inner.clear_seq = 0;
+        inner.raw_profile_frames = 0;
+        inner.raw_profile_us = 0;
+        inner.raw_profile_tiles = 0;
+        inner.raw_profile_bytes = 0;
         self.avc.store(true, Ordering::Release);
+        self.avc444.store(false, Ordering::Release);
         self.frames_acked.store(0, Ordering::Release);
         self.ack_latency_us.store(0, Ordering::Release);
         self.send_times
@@ -224,13 +324,41 @@ impl VideoHub {
         }
     }
 
-    /// Handler callback: capabilities negotiated, frames may flow. `avc` says whether the
-    /// client accepts AVC420; the host reads it back through [`Self::codec`] on `VideoStart`.
-    pub(crate) fn on_ready(&self, avc: bool) {
+    /// Select a policy for the next client connection (or reconnect).
+    /// ClearCodec is mandatory for EGFX, and AVC420 is used only if advertised.
+    pub fn set_preference(&self, preference: VideoPreference) {
+        self.preference.store(preference as u8, Ordering::Release);
+    }
+
+    pub fn preference(&self) -> VideoPreference {
+        match self.preference.load(Ordering::Acquire) {
+            1 => VideoPreference::ClearCodec,
+            2 => VideoPreference::Avc420,
+            3 => VideoPreference::Avc444,
+            _ => VideoPreference::Auto,
+        }
+    }
+
+    /// Select an actual wire codec only from confirmed client capabilities.
+    pub(crate) fn on_ready(&self, client_avc420: bool, client_avc444: bool) {
         let (w, h) = self.session_size();
-        self.avc.store(avc, Ordering::Release);
+        let preference = self.preference();
+        let (codec, reason) = selected_codec(preference, client_avc420, client_avc444);
+        self.avc.store(codec != VideoCodec::Raw, Ordering::Release);
+        self.avc444
+            .store(codec == VideoCodec::Avc444, Ordering::Release);
         if !self.channel_open.swap(true, Ordering::AcqRel) {
-            info!(width = w, height = h, avc, "EGFX ready; requesting video");
+            info!(
+                gfx_session = self.session_id(),
+                width = w,
+                height = h,
+                requested = ?preference,
+                selected = ?codec,
+                reason,
+                client_avc420,
+                client_avc444,
+                "RDPGFX_CODEC_SELECTED"
+            );
             (self.sink)(CoreEvent::VideoStart {
                 width: w,
                 height: h,
@@ -262,7 +390,7 @@ impl VideoHub {
     /// Handler callback, or session end: the graphics channel is gone.
     pub(crate) fn on_close(&self) {
         if self.channel_open.swap(false, Ordering::AcqRel) {
-            info!("EGFX closed; stopping video");
+            info!(gfx_session = self.session_id(), selected = ?self.codec(), "RDPGFX_CHANNEL_CLOSED");
             (self.sink)(CoreEvent::VideoStop);
         }
     }
@@ -279,7 +407,9 @@ impl VideoHub {
 
     /// How the host must submit frames for the current session.
     pub fn codec(&self) -> VideoCodec {
-        if self.avc.load(Ordering::Acquire) {
+        if self.avc444.load(Ordering::Acquire) {
+            VideoCodec::Avc444
+        } else if self.avc.load(Ordering::Acquire) {
             VideoCodec::H264
         } else {
             VideoCodec::Raw
@@ -327,8 +457,8 @@ impl VideoHub {
         if data.is_empty() || !self.channel_open.load(Ordering::Acquire) {
             return SubmitResult::NotReady;
         }
-        if !self.avc.load(Ordering::Acquire) {
-            // The client can't decode H.264; sending it is what makes it disconnect.
+        if !self.avc.load(Ordering::Acquire) || self.avc444.load(Ordering::Acquire) {
+            // Never send AVC420 into an AVC444 or ClearCodec session.
             return SubmitResult::NotReady;
         }
         if (width, height) != self.session_size() {
@@ -373,9 +503,90 @@ impl VideoHub {
         Self::post(&sender, channel_id, messages);
 
         if sent {
+            if inner.frames_sent == 0 {
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "AVC420",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
+            }
             inner.need_keyframe = false;
             inner.frames_sent += 1;
             inner.bytes_sent += data.len() as u64;
+            SubmitResult::Sent
+        } else {
+            inner.need_keyframe = true;
+            inner.frames_dropped += 1;
+            SubmitResult::NeedKeyframe
+        }
+    }
+
+    /// Sends two matching H.264 Annex-B access units as one AVC444 frame.
+    /// Rejects unsupported codecs and stale capture dimensions.
+    pub fn submit_avc444(
+        &self,
+        luma: &[u8],
+        chroma: &[u8],
+        keyframe: bool,
+        width: u16,
+        height: u16,
+    ) -> SubmitResult {
+        if luma.is_empty() || chroma.is_empty() || !self.channel_open.load(Ordering::Acquire) {
+            return SubmitResult::NotReady;
+        }
+        if !self.avc444.load(Ordering::Acquire) || (width, height) != self.session_size() {
+            return SubmitResult::NotReady;
+        }
+        let mut inner = self.lock();
+        let (Some(handle), Some(sender)) = (inner.handle.clone(), inner.sender.clone()) else {
+            return SubmitResult::NotReady;
+        };
+        if inner.need_keyframe && !keyframe {
+            inner.frames_dropped += 1;
+            return SubmitResult::NeedKeyframe;
+        }
+        let timestamp_ms = u32::try_from(inner.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let (frame_id, channel_id, messages) = {
+            let mut gfx = handle.lock().unwrap_or_else(|e| e.into_inner());
+            if !gfx.is_ready() {
+                return SubmitResult::NotReady;
+            }
+            let Some(surface) = Self::ensure_surface(&mut inner, &mut gfx, width, height) else {
+                return SubmitResult::NotReady;
+            };
+            let region = Avc420Region {
+                left: 0,
+                top: 0,
+                right: width.saturating_sub(1),
+                bottom: height.saturating_sub(1),
+                quantization_parameter: 22,
+                quality: 100,
+            };
+            let id = gfx.send_avc444_frame(
+                surface,
+                luma,
+                std::slice::from_ref(&region),
+                Some(chroma),
+                Some(std::slice::from_ref(&region)),
+                timestamp_ms,
+            );
+            (id, gfx.channel_id(), gfx.drain_output())
+        };
+        if let Some(id) = frame_id {
+            self.record_send(id);
+        }
+        Self::post(&sender, channel_id, messages);
+        if frame_id.is_some() {
+            if inner.frames_sent == 0 {
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "AVC444",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
+            }
+            inner.need_keyframe = false;
+            inner.frames_sent += 1;
+            inner.bytes_sent += (luma.len() + chroma.len()) as u64;
             SubmitResult::Sent
         } else {
             inner.need_keyframe = true;
@@ -457,6 +668,7 @@ impl VideoHub {
     /// can't be sent (backpressure) is simply dropped: the next one is diffed against what the
     /// client really has, so nothing is lost. `Sent` is also returned when nothing changed.
     pub fn submit_bgra(&self, data: &[u8], width: u16, height: u16, stride: usize) -> SubmitResult {
+        let started = Instant::now();
         if !self.channel_open.load(Ordering::Acquire) || self.avc.load(Ordering::Acquire) {
             return SubmitResult::NotReady;
         }
@@ -481,17 +693,32 @@ impl VideoHub {
         let (Some(handle), Some(sender)) = (inner.handle.clone(), inner.sender.clone()) else {
             return SubmitResult::NotReady;
         };
+        // Avoid spending milliseconds encoding a large frame if EGFX is already
+        // blocked on client ACKs. Check again before posting in case state changes.
+        {
+            let gfx = handle.lock().unwrap_or_else(|e| e.into_inner());
+            if !gfx.is_ready() || gfx.should_backpressure() {
+                return SubmitResult::NotReady;
+            }
+        }
         if inner.surface.is_none() {
             inner.shown.clear();
         }
         let full = inner.shown.len() != row * h;
+        let tile_size = if !full && use_dense_tiles(data, &inner.shown, w, h, stride) {
+            TILE_DENSE
+        } else {
+            TILE_SMALL
+        };
 
         // Encode changed tiles before taking the pipeline lock (encoding is the slow part).
         let mut tiles = Vec::new();
+        let mut changed_rects = Vec::new();
         let mut bytes = 0usize;
-        let mut tile_buf = Vec::with_capacity(TILE * 2 * TILE * 2 * 4);
-        for &(ty, th) in &tile_spans(h) {
-            for &(tx, tw) in &tile_spans(w) {
+        let mut tile_buf =
+            Vec::with_capacity((TILE_DENSE + MIN_TILE) * (TILE_DENSE + MIN_TILE) * 4);
+        for &(ty, th) in &tile_spans(h, tile_size) {
+            for &(tx, tw) in &tile_spans(w, tile_size) {
                 let changed = full
                     || (ty..ty + th).any(|y| {
                         let src = &data[y * stride + tx * 4..y * stride + (tx + tw) * 4];
@@ -508,6 +735,7 @@ impl VideoHub {
                 // Tile sizes are bounded by the u16 session size.
                 let bitmap_data = inner.clear.encode(&tile_buf, tw as u16, th as u16);
                 bytes += bitmap_data.len();
+                changed_rects.push((tx, ty, tw, th));
                 tiles.push(MixedTilePayload::ClearCodec {
                     destination: ExclusiveRectangle {
                         left: tx as u16,
@@ -552,20 +780,136 @@ impl VideoHub {
         Self::post(&sender, channel_id, messages);
 
         if frame_id.is_some() {
+            if inner.frames_sent == 0 {
+                info!(
+                    gfx_session = self.session_id(),
+                    codec = "ClearCodec",
+                    "RDPGFX_FIRST_FRAME_SENT"
+                );
+            }
             inner.clear_seq = seq;
             if full {
-                inner.shown = vec![0; row * h];
+                inner.shown.resize(row * h, 0);
             }
-            for y in 0..h {
-                inner.shown[y * row..(y + 1) * row]
-                    .copy_from_slice(&data[y * stride..y * stride + row]);
+            // When a small window changes, copying the entire Retina screen
+            // (~20 MiB at 2776x1938) on every frame is unnecessary. Cache only
+            // the tiles actually queued, keeping the diff baseline accurate.
+            for &(tx, ty, tw, th) in &changed_rects {
+                let byte_x = tx * 4;
+                let byte_w = tw * 4;
+                for y in ty..ty + th {
+                    let src = y * stride + byte_x;
+                    let dst = y * row + byte_x;
+                    inner.shown[dst..dst + byte_w].copy_from_slice(&data[src..src + byte_w]);
+                }
             }
             inner.frames_sent += 1;
             inner.bytes_sent += bytes as u64;
+            inner.raw_profile_frames += 1;
+            inner.raw_profile_us = inner
+                .raw_profile_us
+                .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
+            inner.raw_profile_tiles += changed_rects.len() as u64;
+            inner.raw_profile_bytes += bytes as u64;
+            if inner.raw_profile_frames >= 30 {
+                let frames = inner.raw_profile_frames;
+                info!(
+                    avg_encode_ms = inner.raw_profile_us / frames / 1000,
+                    avg_tiles = inner.raw_profile_tiles / frames,
+                    avg_kib = inner.raw_profile_bytes / frames / 1024,
+                    ack_ms = self.ack_latency_us.load(Ordering::Acquire) / 1000,
+                    in_flight = inner
+                        .frames_sent
+                        .saturating_sub(self.frames_acked.load(Ordering::Acquire)),
+                    "ClearCodec mobile performance"
+                );
+                inner.raw_profile_frames = 0;
+                inner.raw_profile_us = 0;
+                inner.raw_profile_tiles = 0;
+                inner.raw_profile_bytes = 0;
+            }
             SubmitResult::Sent
         } else {
             inner.frames_dropped += 1;
             SubmitResult::NotReady
         }
+    }
+}
+
+#[cfg(test)]
+mod video_preference_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn only_implemented_graphics_modes_are_accepted() {
+        assert_eq!(VideoPreference::from_u32(0), Some(VideoPreference::Auto));
+        assert_eq!(
+            VideoPreference::from_u32(1),
+            Some(VideoPreference::ClearCodec)
+        );
+        assert_eq!(VideoPreference::from_u32(2), Some(VideoPreference::Avc420));
+        assert_eq!(VideoPreference::from_u32(3), Some(VideoPreference::Avc444));
+        // Azure HEVC is not part of this pinned EGFX protocol version.
+        assert_eq!(VideoPreference::from_u32(4), None);
+        assert_eq!(VideoPreference::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn codec_selection_logs_explicit_fallback_reasons() {
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, true, false),
+            (VideoCodec::H264, "fallback-avc444-to-avc420")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, false, false),
+            (VideoCodec::Raw, "fallback-client-avc-unavailable")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Avc444, true, true),
+            (VideoCodec::Avc444, "requested-avc444")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::Auto, false, false),
+            (VideoCodec::Raw, "auto-client-avc-unavailable")
+        );
+        assert_eq!(
+            selected_codec(VideoPreference::ClearCodec, true, true),
+            (VideoCodec::Raw, "requested-clearcodec")
+        );
+    }
+
+    #[test]
+    fn policy_does_not_override_mobile_avc_disabled() {
+        let hub = VideoHub::new(Arc::new(|_| {}));
+        hub.set_preference(VideoPreference::Avc420);
+        hub.on_ready(false, false);
+        assert_eq!(hub.codec(), VideoCodec::Raw);
+        hub.on_close();
+
+        hub.on_ready(true, true);
+        assert_eq!(hub.codec(), VideoCodec::H264);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::Avc444);
+        hub.on_ready(true, true);
+        assert_eq!(hub.codec(), VideoCodec::Avc444);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::Avc444);
+        hub.on_ready(false, false);
+        assert_eq!(hub.codec(), VideoCodec::Raw);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::ClearCodec);
+        hub.on_ready(true, true);
+        assert_eq!(hub.codec(), VideoCodec::Raw);
+        hub.on_close();
+
+        hub.set_preference(VideoPreference::Auto);
+        hub.on_ready(true, true);
+        assert_eq!(hub.codec(), VideoCodec::H264);
+        hub.on_close();
     }
 }
