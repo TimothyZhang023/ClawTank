@@ -595,6 +595,19 @@ void ct_server_hide_pointer(const CtServer *server);
 bool ct_server_video_can_accept(const CtServer *server);
 
 /**
+ * Set the preferred RDP graphics codec for future connections:
+ * 0=Automatic, 1=Lossless ClearCodec, 2=H.264 AVC420.
+ * Unsupported AVC444 (3), HEVC (4) and other numbers return false.
+ * If the client advertised AVC_DISABLED, ClearCodec is always selected.
+ * An existing session keeps its codec until reconnect.
+ * Returns false for a null server.
+ *
+ * # Safety
+ * `server` must be null or a live pointer returned by `ct_server_start`.
+ */
+bool ct_server_set_video_preference(const CtServer *server, uint32_t preference);
+
+/**
  * How the host must submit video for the current session; valid from `VideoStart` on.
  * `H264` for a null server.
  *
