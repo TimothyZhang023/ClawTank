@@ -20,7 +20,7 @@ use crate::events::CoreEvent;
 use crate::input::InputEvent;
 use crate::server::{self, ServerConfig, ServerHandle};
 use crate::tls::TlsIdentity;
-use crate::video::{SubmitResult, VideoCodec};
+use crate::video::{SubmitResult, VideoCodec, VideoPreference};
 
 /// Result code for FFI calls.
 #[repr(C)]
@@ -995,6 +995,30 @@ pub unsafe extern "C" fn ct_server_video_can_accept(server: *const CtServer) -> 
     unsafe { server.as_ref() }.is_some_and(|s| s.handle.video().can_accept())
 }
 
+/// Sets the preferred video codec for future EGFX negotiations.
+/// 0=Auto, 1=ClearCodec lossless, 2=H.264 AVC420.
+/// Unimplemented AVC444 (3) and H.265/HEVC (4) are explicitly rejected.
+/// A client advertising AVC_DISABLED always receives ClearCodec regardless of
+/// a request to use AVC420. Current sessions do not switch codec.
+/// Returns false for null pointers or unsupported preferences.
+///
+/// # Safety
+/// `server` must be null or a live pointer returned by `ct_server_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ct_server_set_video_preference(
+    server: *const CtServer,
+    preference: u32,
+) -> bool {
+    let Some(server) = (unsafe { server.as_ref() }) else {
+        return false;
+    };
+    let Some(preference) = VideoPreference::from_u32(preference) else {
+        return false;
+    };
+    server.handle.video().set_preference(preference);
+    true
+}
+
 /// How the host must submit video for the current session; valid from `VideoStart` on.
 /// `H264` for a null server.
 ///
@@ -1208,6 +1232,8 @@ mod tests {
                 CtSubmitResult::NotReady
             );
             assert!(!ct_server_video_can_accept(null()));
+            assert!(!ct_server_set_video_preference(null(), 0));
+            assert!(!ct_server_set_video_preference(null(), 3));
             assert_eq!(ct_server_video_codec(null()), CtVideoCodec::H264);
             assert_eq!(ct_server_video_stats(null()), CtVideoStats::default());
             ct_server_stop(null_mut());
