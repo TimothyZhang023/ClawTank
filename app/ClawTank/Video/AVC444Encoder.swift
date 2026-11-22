@@ -3,8 +3,6 @@
 // missing chroma at odd pixels. These are distinct H.264 streams, NOT H.264 4:4:4.
 // Keep the encoders on one serial queue: flush() pairs access units by capture frame.
 
-// Pixel neighborhood and YUV-channel abbreviations follow the wire format.
-// swiftlint:disable identifier_name
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -103,9 +101,9 @@ final class AVC444Encoder: @unchecked Sendable {
         defer { CVPixelBufferUnlockBaseAddress(second, []) }
 
         guard let src = CVPixelBufferGetBaseAddress(source)?.assumingMemoryBound(to: UInt8.self),
-              let y1 = CVPixelBufferGetBaseAddressOfPlane(first, 0)?.assumingMemoryBound(to: UInt8.self),
+              let mainLuma = CVPixelBufferGetBaseAddressOfPlane(first, 0)?.assumingMemoryBound(to: UInt8.self),
               let uv1 = CVPixelBufferGetBaseAddressOfPlane(first, 1)?.assumingMemoryBound(to: UInt8.self),
-              let y2 = CVPixelBufferGetBaseAddressOfPlane(second, 0)?.assumingMemoryBound(to: UInt8.self),
+              let auxLuma = CVPixelBufferGetBaseAddressOfPlane(second, 0)?.assumingMemoryBound(to: UInt8.self),
               let uv2 = CVPixelBufferGetBaseAddressOfPlane(second, 1)?.assumingMemoryBound(to: UInt8.self)
         else { return nil }
 
@@ -119,30 +117,30 @@ final class AVC444Encoder: @unchecked Sendable {
             let half = row / 2
             let band = (half & ~7) + half
             for col in stride(from: 0, to: width, by: 2) {
-                let a = sample(src + row * srcStride + col * 4)
-                let b = sample(src + row * srcStride + (col + 1) * 4)
-                let c = sample(src + (row + 1) * srcStride + col * 4)
-                let d = sample(src + (row + 1) * srcStride + (col + 1) * 4)
-                y1[row * y1Stride + col] = a.y
-                y1[row * y1Stride + col + 1] = b.y
-                y1[(row + 1) * y1Stride + col] = c.y
-                y1[(row + 1) * y1Stride + col + 1] = d.y
+                let topLeft = sample(src + row * srcStride + col * 4)
+                let topRight = sample(src + row * srcStride + (col + 1) * 4)
+                let bottomLeft = sample(src + (row + 1) * srcStride + col * 4)
+                let bottomRight = sample(src + (row + 1) * srcStride + (col + 1) * 4)
+                mainLuma[row * y1Stride + col] = topLeft.y
+                mainLuma[row * y1Stride + col + 1] = topRight.y
+                mainLuma[(row + 1) * y1Stride + col] = bottomLeft.y
+                mainLuma[(row + 1) * y1Stride + col + 1] = bottomRight.y
 
                 // Match the FreeRDP AVC444 BGRA decomposition: base UV average.
                 uv1[half * uv1Stride + col] =
-                    UInt8((Int(a.u) + Int(b.u) + Int(c.u) + Int(d.u)) / 4)
+                    UInt8((Int(topLeft.cb) + Int(topRight.cb) + Int(bottomLeft.cb) + Int(bottomRight.cb)) / 4)
                 uv1[half * uv1Stride + col + 1] =
-                    UInt8((Int(a.v) + Int(b.v) + Int(c.v) + Int(d.v)) / 4)
+                    UInt8((Int(topLeft.cr) + Int(topRight.cr) + Int(bottomLeft.cr) + Int(bottomRight.cr)) / 4)
 
                 // B45: odd image rows' full-resolution chroma. U and V are
                 // stored in separate 8-line bands in auxiliary luma.
-                y2[band * y2Stride + col] = c.u
-                y2[band * y2Stride + col + 1] = d.u
-                y2[(band + 8) * y2Stride + col] = c.v
-                y2[(band + 8) * y2Stride + col + 1] = d.v
+                auxLuma[band * y2Stride + col] = bottomLeft.cb
+                auxLuma[band * y2Stride + col + 1] = bottomRight.cb
+                auxLuma[(band + 8) * y2Stride + col] = bottomLeft.cr
+                auxLuma[(band + 8) * y2Stride + col + 1] = bottomRight.cr
                 // B6/B7: even-row odd-column chroma in auxiliary UV.
-                uv2[half * uv2Stride + col] = b.u
-                uv2[half * uv2Stride + col + 1] = b.v
+                uv2[half * uv2Stride + col] = topRight.cb
+                uv2[half * uv2Stride + col + 1] = topRight.cr
             }
         }
         return (first, second)
@@ -161,19 +159,19 @@ final class AVC444Encoder: @unchecked Sendable {
 
     private struct Yuv {
         let y: UInt8
-        let u: UInt8
-        let v: UInt8
+        let cb: UInt8
+        let cr: UInt8
     }
 
     /// BT.601 video-range YUV conversion. The paired views use the same matrix.
     private static func sample(_ pixel: UnsafePointer<UInt8>) -> Yuv {
-        let b = Int(pixel[0])
-        let g = Int(pixel[1])
-        let r = Int(pixel[2])
+        let blue = Int(pixel[0])
+        let green = Int(pixel[1])
+        let red = Int(pixel[2])
         func clamp(_ value: Int) -> UInt8 { UInt8(clamping: value) }
         return Yuv(
-            y: clamp(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16),
-            u: clamp(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128),
-            v: clamp(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128))
+            y: clamp(((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16),
+            cb: clamp(((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128),
+            cr: clamp(((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128))
     }
 }
