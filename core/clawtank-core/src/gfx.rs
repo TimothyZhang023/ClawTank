@@ -63,9 +63,31 @@ struct GfxHandler {
 /// For clients that don't set it (mstsc, Windows App on macOS/Windows) the result is unchanged.
 /// The version ladder is IronRDP's default; only the flags differ.
 pub(crate) fn preferred_capabilities() -> Vec<CapabilitySet> {
+    // Advertise each independently negotiated 10.x version that our AVC420 or
+    // ClearCodec transport supports. A mobile client may offer V10.4 but not
+    // V10.7; without the exact version it falls back unnecessarily to V10.
+    // V10.1 implies AVC444v2, which we do not encode, so exclude it.
     vec![
         CapabilitySet::V10_7 {
             flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_6Err {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_6 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_5 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_3 {
+            flags: CapabilitiesV103Flags::AVC_DISABLED,
+        },
+        CapabilitySet::V10_2 {
+            flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED,
         },
         CapabilitySet::V10 {
             flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED,
@@ -101,7 +123,7 @@ pub(crate) fn avc420_allowed(caps: &CapabilitySet) -> bool {
 
 impl GraphicsPipelineHandler for GfxHandler {
     fn capabilities_advertise(&mut self, pdu: &CapabilitiesAdvertisePdu) {
-        debug!(?pdu, "Client EGFX capabilities");
+        info!(?pdu, "Client EGFX capabilities advertised");
     }
 
     fn preferred_capabilities(&self) -> Vec<CapabilitySet> {
@@ -145,6 +167,9 @@ mod tests {
                 (CapabilitySet::V10 { flags: cf }, CapabilitySet::V10 { flags: sf }) => {
                     CapabilitySet::V10 { flags: *cf & *sf }
                 }
+                (CapabilitySet::V10_4 { flags: cf }, CapabilitySet::V10_4 { flags: sf }) => {
+                    CapabilitySet::V10_4 { flags: *cf & *sf }
+                }
                 (CapabilitySet::V8_1 { flags: cf }, CapabilitySet::V8_1 { flags: sf }) => {
                     CapabilitySet::V8_1 { flags: *cf & *sf }
                 }
@@ -175,8 +200,8 @@ mod tests {
         let negotiated = negotiate(&client).expect("common version");
         assert_eq!(
             negotiated,
-            CapabilitySet::V10 {
-                flags: CapabilitiesV10Flags::SMALL_CACHE | CapabilitiesV10Flags::AVC_DISABLED
+            CapabilitySet::V10_4 {
+                flags: CapabilitiesV104Flags::SMALL_CACHE | CapabilitiesV104Flags::AVC_DISABLED
             }
         );
         assert!(!avc420_allowed(&negotiated));
@@ -197,6 +222,21 @@ mod tests {
             negotiated,
             CapabilitySet::V10_7 {
                 flags: CapabilitiesV107Flags::SMALL_CACHE
+            }
+        );
+        assert!(avc420_allowed(&negotiated));
+    }
+
+    #[test]
+    fn desktop_v10_4_without_avc_disabled_still_gets_avc() {
+        let client = [CapabilitySet::V10_4 {
+            flags: CapabilitiesV104Flags::SMALL_CACHE,
+        }];
+        let negotiated = negotiate(&client).expect("common version");
+        assert_eq!(
+            negotiated,
+            CapabilitySet::V10_4 {
+                flags: CapabilitiesV104Flags::SMALL_CACHE,
             }
         );
         assert!(avc420_allowed(&negotiated));
