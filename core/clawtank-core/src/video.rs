@@ -543,7 +543,8 @@ impl VideoHub {
         let mut tiles = Vec::new();
         let mut changed_rects = Vec::new();
         let mut bytes = 0usize;
-        let mut tile_buf = Vec::with_capacity((TILE_DENSE + MIN_TILE) * (TILE_DENSE + MIN_TILE) * 4);
+        let mut tile_buf =
+            Vec::with_capacity((TILE_DENSE + MIN_TILE) * (TILE_DENSE + MIN_TILE) * 4);
         for &(ty, th) in &tile_spans(h, tile_size) {
             for &(tx, tw) in &tile_spans(w, tile_size) {
                 let changed = full
@@ -626,9 +627,9 @@ impl VideoHub {
             inner.frames_sent += 1;
             inner.bytes_sent += bytes as u64;
             inner.raw_profile_frames += 1;
-            inner.raw_profile_us = inner.raw_profile_us.saturating_add(
-                u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-            );
+            inner.raw_profile_us = inner
+                .raw_profile_us
+                .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
             inner.raw_profile_tiles += changed_rects.len() as u64;
             inner.raw_profile_bytes += bytes as u64;
             if inner.raw_profile_frames >= 30 {
@@ -638,7 +639,9 @@ impl VideoHub {
                     avg_tiles = inner.raw_profile_tiles / frames,
                     avg_kib = inner.raw_profile_bytes / frames / 1024,
                     ack_ms = self.ack_latency_us.load(Ordering::Acquire) / 1000,
-                    in_flight = inner.frames_sent.saturating_sub(self.frames_acked.load(Ordering::Acquire)),
+                    in_flight = inner
+                        .frames_sent
+                        .saturating_sub(self.frames_acked.load(Ordering::Acquire)),
                     "ClearCodec mobile performance"
                 );
                 inner.raw_profile_frames = 0;
