@@ -309,6 +309,10 @@ final class ServerController: ObservableObject {
         cursor = nil
     }
 
+}
+
+// Video lifecycle (same file, so it keeps access to the controller's private state).
+extension ServerController {
     private func fail(_ message: String) {
         log.error("\(message, privacy: .public)")
         endSession()
@@ -317,10 +321,6 @@ final class ServerController: ObservableObject {
         status = .failed(message)
     }
 
-}
-
-// Video lifecycle (same file, so it keeps access to the controller's private state).
-extension ServerController {
     /// Starts (or, after a resize, restarts) video at `width`×`height`. Start, stop and restart
     /// run strictly in order on `videoTask` so a resize can't race a disconnect.
     private func startVideo(width: Int, height: Int, scalePercent: Int?) {
