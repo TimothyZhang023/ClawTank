@@ -4,6 +4,9 @@ All notable changes are documented here. Format: [Keep a Changelog](https://keep
 
 ## [Unreleased]
 
+### Graphics codec selection
+- Display & Quality now offers Automatic, lossless ClearCodec, and prefer H.264/AVC420. The server checks negotiated EGFX capabilities and always falls back to ClearCodec when AVC_DISABLED is set (notably iPad Windows App). AVC444 and HEVC appear as disabled future modes: AVC444 needs real dual-stream H.264 encoding, and standard MS-RDPEGFX has no HEVC codec ID for Windows App.
+
 ### Fixed
 - iPad Windows App direct-touch clicks can land at the previous mouse position: preserve the (x,y) present in RDP button PDUs by forwarding a position update before press/release; preserve relative movement and ignore undefined wheel coordinates.
 - Windows App / Microsoft Remote Desktop on **Android and iOS/iPadOS** disconnected with "protocol error" right after login ([HMAKT99/ClawTank#10](https://github.com/HMAKT99/ClawTank/issues/10)). These clients advertise the graphics pipeline with `AVC_DISABLED` (no H.264 decoder); IronRDP's negotiation dropped the flag, so ClawTank confirmed AVC and sent H.264. The flag is now kept, and such clients get a lossless raw-frame path instead: BGRA capture, changed 64×64 tiles only, sent as ClearCodec (ADR-025). Desktop clients still get H.264, unchanged.
