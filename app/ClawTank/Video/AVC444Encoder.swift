@@ -128,19 +128,21 @@ final class AVC444Encoder: @unchecked Sendable {
 
                 // Match the FreeRDP AVC444 BGRA decomposition: base UV average.
                 uv1[half * uv1Stride + col] =
-                    UInt8((Int(topLeft.cb) + Int(topRight.cb) + Int(bottomLeft.cb) + Int(bottomRight.cb)) / 4)
+                    UInt8((Int(topLeft.chromaBlue) + Int(topRight.chromaBlue) +
+                           Int(bottomLeft.chromaBlue) + Int(bottomRight.chromaBlue)) / 4)
                 uv1[half * uv1Stride + col + 1] =
-                    UInt8((Int(topLeft.cr) + Int(topRight.cr) + Int(bottomLeft.cr) + Int(bottomRight.cr)) / 4)
+                    UInt8((Int(topLeft.chromaRed) + Int(topRight.chromaRed) +
+                           Int(bottomLeft.chromaRed) + Int(bottomRight.chromaRed)) / 4)
 
                 // B45: odd image rows' full-resolution chroma. U and V are
                 // stored in separate 8-line bands in auxiliary luma.
-                auxLuma[band * y2Stride + col] = bottomLeft.cb
-                auxLuma[band * y2Stride + col + 1] = bottomRight.cb
-                auxLuma[(band + 8) * y2Stride + col] = bottomLeft.cr
-                auxLuma[(band + 8) * y2Stride + col + 1] = bottomRight.cr
+                auxLuma[band * y2Stride + col] = bottomLeft.chromaBlue
+                auxLuma[band * y2Stride + col + 1] = bottomRight.chromaBlue
+                auxLuma[(band + 8) * y2Stride + col] = bottomLeft.chromaRed
+                auxLuma[(band + 8) * y2Stride + col + 1] = bottomRight.chromaRed
                 // B6/B7: even-row odd-column chroma in auxiliary UV.
-                uv2[half * uv2Stride + col] = topRight.cb
-                uv2[half * uv2Stride + col + 1] = topRight.cr
+                uv2[half * uv2Stride + col] = topRight.chromaBlue
+                uv2[half * uv2Stride + col + 1] = topRight.chromaRed
             }
         }
         return (first, second)
@@ -159,8 +161,8 @@ final class AVC444Encoder: @unchecked Sendable {
 
     private struct Yuv {
         let y: UInt8
-        let cb: UInt8
-        let cr: UInt8
+        let chromaBlue: UInt8
+        let chromaRed: UInt8
     }
 
     /// BT.601 video-range YUV conversion. The paired views use the same matrix.
@@ -171,7 +173,7 @@ final class AVC444Encoder: @unchecked Sendable {
         func clamp(_ value: Int) -> UInt8 { UInt8(clamping: value) }
         return Yuv(
             y: clamp(((66 * red + 129 * green + 25 * blue + 128) >> 8) + 16),
-            cb: clamp(((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128),
-            cr: clamp(((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128))
+            chromaBlue: clamp(((-38 * red - 74 * green + 112 * blue + 128) >> 8) + 128),
+            chromaRed: clamp(((112 * red - 94 * green - 18 * blue + 128) >> 8) + 128))
     }
 }
