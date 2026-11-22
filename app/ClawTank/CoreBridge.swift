@@ -187,6 +187,17 @@ final class RdpServer: @unchecked Sendable {
 
     deinit { stop() }
 
+    /// Set the codec preference for future connections. The core always checks
+    /// the client's EGFX capability before actually selecting AVC420.
+    @discardableResult
+    func setVideoMode(_ mode: VideoMode) -> Bool {
+        guard let value = mode.coreValue else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let handle else { return false }
+        return ct_server_set_video_preference(handle, value)
+    }
+
     /// Hands one Annex-B access unit to the core (copied before returning). Thread-safe.
     func submitH264(_ data: Data, keyframe: Bool, width: Int, height: Int) -> SubmitResult {
         lock.lock()
