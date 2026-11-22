@@ -47,6 +47,95 @@ use crate::{SoundServerFactory, builder, capabilities};
 /// TCP listen backlog size for the RDP server socket.
 const LISTENER_BACKLOG: u32 = 1024;
 
+fn capability_name(cap: &CapabilitySet) -> &'static str {
+    use CapabilitySet::*;
+    match cap {
+        General(_) => "General",
+        Bitmap(_) => "Bitmap",
+        Order(_) => "Order",
+        BitmapCache(_) => "BitmapCache",
+        BitmapCacheRev2(_) => "BitmapCacheRev2",
+        Pointer(_) => "Pointer",
+        Sound(_) => "Sound",
+        Input(_) => "Input",
+        Brush(_) => "Brush",
+        GlyphCache(_) => "GlyphCache",
+        OffscreenBitmapCache(_) => "OffscreenBitmapCache",
+        VirtualChannel(_) => "VirtualChannel",
+        Control(_) => "Control",
+        WindowActivation(_) => "WindowActivation",
+        Share(_) => "Share",
+        Font(_) => "Font",
+        BitmapCacheHostSupport(_) => "BitmapCacheHostSupport",
+        DesktopComposition(_) => "DesktopComposition",
+        MultiFragmentUpdate(_) => "MultiFragmentUpdate",
+        LargePointer(_) => "LargePointer",
+        SurfaceCommands(_) => "SurfaceCommands",
+        BitmapCodecs(_) => "BitmapCodecs",
+        FrameAcknowledge(_) => "FrameAcknowledge",
+        ColorCache(_) => "ColorCache",
+        DrawNineGridCache(_) => "DrawNineGridCache",
+        DrawGdiPlus(_) => "DrawGdiPlus",
+        Rail(_) => "Rail",
+        WindowList(_) => "WindowList",
+        BitmapCacheV3(_) => "BitmapCacheV3",
+    }
+}
+
+/// Keep individual os.Logger messages short: macOS truncates the Debug
+/// representation of large capability arrays before later entries are visible.
+/// All entries are metadata (no credentials, bitmap data or key material).
+fn log_handshake_capabilities(stage: &'static str, caps: &[CapabilitySet]) {
+    let names = caps.iter().map(capability_name).collect::<Vec<_>>().join(",");
+    info!(
+        rdp_stage = stage,
+        count = caps.len(),
+        types = %names,
+        "RDP_HANDSHAKE_CAP_TYPES"
+    );
+    for (index, cap) in caps.iter().enumerate() {
+        let detail = match cap {
+            CapabilitySet::General(c) => format!(
+                "protocol={},platform={:?}/{:?},extra=0x{:X}",
+                c.protocol_version,
+                c.major_platform_type,
+                c.minor_platform_type,
+                c.extra_flags.bits()
+            ),
+            CapabilitySet::Bitmap(c) => format!(
+                "{}x{},bpp={},resize={},drawing=0x{:X}",
+                c.desktop_width,
+                c.desktop_height,
+                c.pref_bits_per_pix,
+                c.desktop_resize_flag,
+                c.drawing_flags.bits()
+            ),
+            CapabilitySet::Order(c) => format!(
+                "flags=0x{:X},extra=0x{:X}",
+                c.order_flags.bits(),
+                c.order_support_ex_flags.bits()
+            ),
+            CapabilitySet::SurfaceCommands(c) => format!("flags=0x{:08X}", c.flags.bits()),
+            CapabilitySet::FrameAcknowledge(c) => {
+                format!("max_unacked_frames={}", c.max_unacknowledged_frame_count)
+            }
+            CapabilitySet::BitmapCodecs(c) => format!("codec_count={}", c.0.len()),
+            CapabilitySet::MultiFragmentUpdate(c) => format!("max_request_size={}", c.max_request_size),
+            CapabilitySet::VirtualChannel(c) => format!("flags=0x{:X}", c.flags.bits()),
+            CapabilitySet::Input(c) => format!("flags=0x{:X}", c.input_flags.bits()),
+            _ => continue,
+        };
+        info!(
+            rdp_stage = stage,
+            cap_index = index,
+            cap_type = capability_name(cap),
+            detail = %detail,
+            "RDP_HANDSHAKE_CAP_DETAIL"
+        );
+    }
+}
+
+
 /// Action to take after a client disconnects.
 ///
 /// Returned by [`ConnectionHandler::on_disconnected`] to control whether
@@ -817,13 +906,8 @@ impl RdpServer {
         let capabilities = capabilities::capabilities(&self.opts, size);
         // One per connection: inspect the *actual* Demand Active capability sets
         // before looking at the later RDPGFX codec negotiation. Never log credentials.
-        info!(
-            rdp_stage = "demand_active",
-            server_core_version = "0x00080004",
-            count = capabilities.len(),
-            server_caps = ?capabilities,
-            "RDP_HANDSHAKE_SERVER_CAPS"
-        );
+        info!(server_core_version = "0x00080004", "RDP_HANDSHAKE_SERVER_VERSION");
+        log_handshake_capabilities("demand_active", &capabilities);
         let mut acceptor = Acceptor::new(self.opts.security.flag(), size, capabilities, self.creds.clone());
         acceptor.set_honor_client_desktop_size(self.opts.honor_client_desktop_size);
 
@@ -1379,13 +1463,11 @@ impl RdpServer {
         // Compare these with Demand Active and the later RDPGFX_CAPS_ADVERTISE
         // for the same connection to diagnose client-side AVC policy changes.
         info!(
-            rdp_stage = "confirm_active",
             reactivation = result.reactivation,
             message_channel_id = ?result.message_channel_id,
-            count = result.capabilities.len(),
-            client_caps = ?result.capabilities,
-            "RDP_HANDSHAKE_CLIENT_CAPS"
+            "RDP_HANDSHAKE_CLIENT_CONFIRM"
         );
+        log_handshake_capabilities("confirm_active", &result.capabilities);
 
         // Validate credentials if a validator is configured. The validator runs here, in the
         // async server layer, rather than in the sans-I/O acceptor, because real validators
