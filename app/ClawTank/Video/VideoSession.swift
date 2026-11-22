@@ -146,7 +146,10 @@ final class VideoSession: @unchecked Sendable {
         coreBytesAtStart = server.videoStats.bytes_sent
         log.info("Raw video \(self.contentWidth)x\(self.contentHeight)@\(self.frameRate) (client has no H.264)")
         let timer = DispatchSource.makeTimerSource(queue: rawQueue)
-        timer.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
+        // Retry a frame shortly after the client's ACK releases EGFX backpressure.
+        // A 50 ms timer adds up to an entire extra frame of idle time on iPad;
+        // 20 ms is cheaper than forcing SCK to produce an unchanged frame.
+        timer.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20))
         timer.setEventHandler { [weak self] in self?.drainRaw() }
         timer.resume()
         rawTimer = timer
