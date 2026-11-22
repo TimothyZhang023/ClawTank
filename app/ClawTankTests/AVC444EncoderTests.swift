@@ -18,11 +18,11 @@ final class AVC444EncoderTests: XCTestCase {
         let stride = CVPixelBufferGetBytesPerRow(result)
         for row in 0..<height {
             for col in 0..<width {
-                let at = row * stride + col * 4
-                bytes[at] = UInt8((col * 9) % 256)
-                bytes[at + 1] = UInt8((row * 17) % 256)
-                bytes[at + 2] = UInt8(((col + row) * 7) % 256)
-                bytes[at + 3] = 255
+                let offset = row * stride + col * 4
+                bytes[offset] = UInt8((col * 9) % 256)
+                bytes[offset + 1] = UInt8((row * 17) % 256)
+                bytes[offset + 2] = UInt8(((col + row) * 7) % 256)
+                bytes[offset + 3] = 255
             }
         }
         return result

@@ -3,6 +3,8 @@
 // missing chroma at odd pixels. These are distinct H.264 streams, NOT H.264 4:4:4.
 // Keep the encoders on one serial queue: flush() pairs access units by capture frame.
 
+// Pixel neighborhood and YUV-channel abbreviations follow the wire format.
+// swiftlint:disable identifier_name
 import CoreMedia
 import CoreVideo
 import Foundation

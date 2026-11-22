@@ -276,7 +276,6 @@ final class VideoSession: @unchecked Sendable {
     }
 }
 
-
 // AVC444's dual H.264 streams are serialized on a separate queue so a slow
 // software encoder cannot block ScreenCaptureKit callbacks or swap timestamps.
 extension VideoSession {
