@@ -32,7 +32,7 @@ use tokio::net::TcpSocket;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::autodetect::{AutoDetectManager, RttSnapshot};
 use crate::clipboard::CliprdrServerFactory;
@@ -815,6 +815,15 @@ impl RdpServer {
 
         let size = self.display.lock().await.size().await;
         let capabilities = capabilities::capabilities(&self.opts, size);
+        // One per connection: inspect the *actual* Demand Active capability sets
+        // before looking at the later RDPGFX codec negotiation. Never log credentials.
+        info!(
+            rdp_stage = "demand_active",
+            server_core_version = "0x00080004",
+            count = capabilities.len(),
+            server_caps = ?capabilities,
+            "RDP_HANDSHAKE_SERVER_CAPS"
+        );
         let mut acceptor = Acceptor::new(self.opts.security.flag(), size, capabilities, self.creds.clone());
         acceptor.set_honor_client_desktop_size(self.opts.honor_client_desktop_size);
 
@@ -1366,6 +1375,17 @@ impl RdpServer {
         W: FramedWrite,
     {
         debug!("Client accepted");
+        // AcceptorResult.capabilities are the client's Confirm Active sets.
+        // Compare these with Demand Active and the later RDPGFX_CAPS_ADVERTISE
+        // for the same connection to diagnose client-side AVC policy changes.
+        info!(
+            rdp_stage = "confirm_active",
+            reactivation = result.reactivation,
+            message_channel_id = ?result.message_channel_id,
+            count = result.capabilities.len(),
+            client_caps = ?result.capabilities,
+            "RDP_HANDSHAKE_CLIENT_CAPS"
+        );
 
         // Validate credentials if a validator is configured. The validator runs here, in the
         // async server layer, rather than in the sans-I/O acceptor, because real validators
